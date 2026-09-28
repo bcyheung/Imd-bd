@@ -3,15 +3,13 @@ main = "src/index.ts"
 compatibility_date = "2026-09-01"
 compatibility_flags = ["nodejs_compat"]
 
-# 本地可直接跑。上线前用 `wrangler secret put JWT_SECRET` 覆盖。
-[vars]
-JWT_SECRET = "ims-dev-change-me"
+# 本地 JWT：复制 .dev.vars.example 为 .dev.vars。线上用 `wrangler secret put JWT_SECRET`。
 # 邮件提醒：MAIL_WEBHOOK_URL 指向邮件网关，可选 MAIL_WEBHOOK_TOKEN（用 secret 配置）和 MAIL_FROM。
 
 [[d1_databases]]
 binding = "DB"
 database_name = "ims"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "a4be6e38-21a8-4f1d-92cc-a75a16e8d3f8"
 migrations_dir = "migrations"
 
 [[r2_buckets]]
