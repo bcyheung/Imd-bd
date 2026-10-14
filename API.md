@@ -53,7 +53,8 @@ Content-Type: application/json
 | code | 說明 |
 | --- | --- |
 | `applicant.read` / `create` / `update` / `delete` | 檔案查看、新建、修改、刪除 |
-| `document.read` / `create` / `update` / `delete` / `verify` | 證件查看、登記、修改、刪除、核驗 |
+| `document.read` / `create` / `update` / `delete` / `verify` | 證件查看、登記、修改、刪除、核驗；`create`、`verify` 也用於申請材料代傳與核驗 |
+| `application.review` / `application.approve` | 受理與初審 / 終審 |
 | `user.read` / `user.manage` | 查看帳號 / 建立、審批、停用、分配角色 |
 | `role.read` / `role.manage` | 查看角色 / 建立、修改、刪除角色 |
 
@@ -255,23 +256,98 @@ Content-Type: application/json
 | 方法 | 路徑 | 權限 | 說明 |
 | --- | --- | --- | --- |
 | `GET` | `/applications` | `applicant.read` | 分頁。`status`、`keyword`（編號、姓名、護照號） |
-| `GET` | `/applications/:id` | `applicant.read` | 申請詳情，含材料和時間線 |
-| `POST` | `/applications/:id/decision` | `applicant.update` | 推進狀態 |
+| `GET` | `/applications/:id` | `applicant.read` | 申請詳情，含材料、時間線和審批記錄 |
+| `POST` | `/applications/:id/decision` | 依目前層級，見下表 | 推進狀態 |
 
 ```json
-{ "action": "approve", "note": "材料齊全" }
+{ "action": "pass_first_review", "note": "護照與照片一致，同意提交終審" }
 ```
 
-| action | 允許的目前狀態 | 結果 |
-| --- | --- | --- |
-| `start_review` | `submitted` 或 `supplement_required` | `under_review` |
-| `request_supplement` | `under_review` | `supplement_required`，`note` 必填 |
-| `approve` | `under_review` | `approved` |
-| `reject` | `under_review` | `rejected`，`note` 必填 |
+審核分初審、終審兩級，狀態都是 `under_review`，用 `approvalLevel` 區分：
 
-狀態不允許時回 `409`。`approve` 時如果還沒有 `fileNo`，會用申請單上的個人資料新建檔案，並把護照登記為已核驗證件，再把檔案編號寫回申請。申請人會收到一則門戶通知。
+| 目前狀態 | `approvalLevel` | 可用的 action | 權限 |
+| --- | --- | --- | --- |
+| `submitted` / `supplement_required` | `null` | `start_review` → `under_review` + `first_review` | `application.review` |
+| `under_review` | `first_review` | `pass_first_review` → `final_review`；`request_supplement`；`reject` | `application.review` |
+| `under_review` | `final_review` | `approve` → `approved`；`return_to_first_review` → `first_review`；`request_supplement`；`reject` | `application.approve` |
 
-申請狀態：`draft` → `submitted` → `under_review` → `approved` 或 `rejected`。審核中可以轉到 `supplement_required`。受理前申請人可以改成 `withdrawn`。
+- 目前狀態或層級不允許該 action 時回 `409`，沒有該層級的權限回 `403`。
+- `request_supplement`、`reject`、`return_to_first_review` 的 `note` 必填，否則回 `400`。
+- 雙人覆核：最近一次 `pass_first_review` 的操作人不能做任何終審決定，回 `403`。退回初審後換人重新初審，以新的初審人為準。
+- `pass_first_review`、`approve` 要求申請材料全部 `verified`，否則回 `409`，`message` 會寫還剩幾份。
+- 只有 `request_supplement`、`reject`、`approve` 的意見寫入 `reviewNote`、進時間線並通知申請人；`start_review`、`pass_first_review`、`return_to_first_review` 只留在審批記錄裡。
+- `approve` 時如果還沒有 `fileNo`，會用申請單上的個人資料新建檔案，並把護照登記為已核驗證件，再把檔案編號寫回申請。
+
+申請物件多了兩個欄位：
+
+```json
+{
+  "approvalLevel": "final_review",
+  "approvals": [
+    {
+      "id": "apv-abc",
+      "level": "first_review",
+      "action": "pass_first_review",
+      "note": "材料齊全",
+      "actorId": "u-002",
+      "actorName": "周安瀾",
+      "at": "2026-10-14T02:00:00.000Z"
+    }
+  ]
+}
+```
+
+`approvalLevel` 只在 `under_review` 時有值。`approvals` 按時間正序，`start_review` 的 `level` 是 `null`。
+
+申請狀態：`draft` → `submitted` → `under_review`（初審 → 終審）→ `approved` 或 `rejected`。審核中可以轉到 `supplement_required`，補件後重新 `start_review`，從初審走起。受理前申請人可以改成 `withdrawn`。
+
+### 申請材料
+
+申請人在門戶上傳的附件和工作人員在窗口代傳的掃描件都在這裡，帶核驗狀態。
+
+| 方法 | 路徑 | 權限 | 說明 |
+| --- | --- | --- | --- |
+| `GET` | `/applications/:id/documents` | `applicant.read` | 全部材料 |
+| `POST` | `/applications/:id/documents` | `document.create` | `multipart/form-data`，欄位 `files`（可多個）、`category`，`201` |
+| `DELETE` | `/applications/:id/documents/:documentId` | `document.create` | 只能刪代傳且待核驗的材料，`204` |
+| `PUT` | `/applications/:id/documents/:documentId/verification` | `document.verify` | `{ "verification": "verified" \| "rejected", "note": "" }`，駁回時 `note` 必填 |
+
+- 只有 `submitted`、`under_review`、`supplement_required` 的申請可以代傳、刪除、核驗，其他狀態回 `409`。
+- 刪除申請人上傳的材料或已核驗的材料回 `409`。
+- 已核驗或已駁回的材料可以重新核驗。新上傳的材料都是 `pending`，已有材料的結論保留。
+
+```json
+{
+  "id": "f-abc",
+  "applicationId": "ap-001",
+  "fileName": "passport.pdf",
+  "mimeType": "application/pdf",
+  "size": 120034,
+  "url": "http://127.0.0.1:8787/api/v1/files/f-abc",
+  "uploadedAt": "2026-10-14T01:00:00.000Z",
+  "category": "passport_scan",
+  "source": "staff",
+  "verification": "pending",
+  "verificationNote": "",
+  "verifiedBy": null,
+  "verifiedAt": null
+}
+```
+
+`category`：`passport_scan`、`photo`、`supporting`、`other`。門戶上傳的材料 `source` 是 `applicant`，`category` 是 `other`。
+
+所有上傳入口（門戶申請材料、證件掃描件、代傳）都做同樣的校驗，整批通過才寫入，不通過回 `400` 並在 `message` 寫明檔名和原因：
+
+| 檢查 | 規則 |
+| --- | --- |
+| 格式 | 副檔名 `pdf` / `jpg` / `jpeg` / `png`，不分大小寫 |
+| 空檔案 | 大小不能為 0 |
+| 大小 | 單個不超過 10 MB |
+| 重名 | 不能和已有檔案或同批檔案同名，不分大小寫 |
+| 檔案頭 | PDF `25 50 44 46`、JPEG `FF D8 FF`、PNG `89 50 4E 47 0D 0A 1A 0A` |
+| 份數 | 加上已有的不超過 10 份 |
+
+`mimeType` 按副檔名決定，不採用瀏覽器傳來的類型。
 
 ### 報表、通知、審計
 

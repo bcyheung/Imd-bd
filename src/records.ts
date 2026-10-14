@@ -1,6 +1,19 @@
+import { id, nowIso } from "./crypto"
+import { fail } from "./http"
+
 const MAX_BYTES = 10 * 1024 * 1024
 const MAX_COUNT = 10
-const ALLOWED = new Set(["application/pdf", "image/jpeg", "image/png"])
+
+/** 允许的扩展名、对应的 MIME 和文件头（magic number），与前端 src/lib/upload.ts 保持一致。 */
+const SIGNATURES: Record<string, { mime: string; bytes: number[] }> = {
+  pdf: { mime: "application/pdf", bytes: [0x25, 0x50, 0x44, 0x46] },
+  jpg: { mime: "image/jpeg", bytes: [0xff, 0xd8, 0xff] },
+  jpeg: { mime: "image/jpeg", bytes: [0xff, 0xd8, 0xff] },
+  png: { mime: "image/png", bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+}
+
+export const DOCUMENT_CATEGORIES = ["passport_scan", "photo", "supporting", "other"] as const
+export type DocumentCategory = (typeof DOCUMENT_CATEGORIES)[number]
 
 export function fileUrl(origin: string, attachment: { id: string; r2_key: string | null }) {
   return attachment.r2_key ? `${origin}/api/v1/files/${attachment.id}` : "#"
@@ -24,6 +37,101 @@ export async function listAttachments(db: D1Database, ownerType: string, ownerId
   }))
 }
 
+interface DocumentRow {
+  id: string
+  owner_id: string
+  file_name: string
+  mime_type: string
+  size: number
+  r2_key: string | null
+  uploaded_at: string
+  category: string
+  source: string
+  verification: string
+  verification_note: string
+  verified_by: string | null
+  verified_at: string | null
+}
+
+function toApplicationDocument(row: DocumentRow, origin: string) {
+  return {
+    id: row.id,
+    applicationId: row.owner_id,
+    fileName: row.file_name,
+    mimeType: row.mime_type,
+    size: row.size,
+    url: fileUrl(origin, row),
+    uploadedAt: row.uploaded_at,
+    category: row.category,
+    source: row.source,
+    verification: row.verification,
+    verificationNote: row.verification_note,
+    verifiedBy: row.verified_by,
+    verifiedAt: row.verified_at,
+  }
+}
+
+/** 工作人员视角的申请材料：申请人上传和窗口代传的都在这里，带核验状态。 */
+export async function listApplicationDocuments(db: D1Database, applicationId: string, origin: string) {
+  const rows = await db
+    .prepare("SELECT * FROM attachments WHERE owner_type = 'application' AND owner_id = ? ORDER BY uploaded_at, id")
+    .bind(applicationId)
+    .all<DocumentRow>()
+  return rows.results.map((row) => toApplicationDocument(row, origin))
+}
+
+export async function getApplicationDocument(db: D1Database, applicationId: string, documentId: string, origin: string) {
+  const row = await db
+    .prepare("SELECT * FROM attachments WHERE owner_type = 'application' AND owner_id = ? AND id = ?")
+    .bind(applicationId, documentId)
+    .first<DocumentRow>()
+  return row ? toApplicationDocument(row, origin) : null
+}
+
+/** 还没有核验通过的申请材料份数；初审通过和终审通过前必须为 0。 */
+export async function countUnverifiedDocuments(db: D1Database, applicationId: string) {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS n FROM attachments WHERE owner_type = 'application' AND owner_id = ? AND verification != 'verified'")
+    .bind(applicationId)
+    .first<{ n: number }>()
+  return row?.n ?? 0
+}
+
+function extension(name: string) {
+  const dot = name.lastIndexOf(".")
+  return dot < 0 ? "" : name.slice(dot + 1).toLowerCase()
+}
+
+function invalidFile(message: string): never {
+  fail(400, "VALIDATION_FAILED", message, { files: message })
+}
+
+/**
+ * 重复前端的上传校验：扩展名、空文件、10 MB、同名、文件头，最后看份数。
+ * 全部通过才开始写入，避免一批文件只存了一半。
+ */
+async function checkFiles(db: D1Database, ownerType: string, ownerId: string, files: File[]) {
+  const existing = await db
+    .prepare("SELECT file_name FROM attachments WHERE owner_type = ? AND owner_id = ?")
+    .bind(ownerType, ownerId)
+    .all<{ file_name: string }>()
+  const seen = new Set(existing.results.map((row) => row.file_name.toLowerCase()))
+  const checked: { file: File; mime: string }[] = []
+  for (const file of files) {
+    const signature = SIGNATURES[extension(file.name)]
+    if (!signature) invalidFile(`${file.name}：格式不支持，仅支持 PDF、JPG、PNG`)
+    if (file.size === 0) invalidFile(`${file.name}：文件为空`)
+    if (file.size > MAX_BYTES) invalidFile(`${file.name}：超过 10 MB`)
+    if (seen.has(file.name.toLowerCase())) invalidFile(`${file.name}：已有同名文件`)
+    const head = new Uint8Array(await file.slice(0, 8).arrayBuffer())
+    if (!signature.bytes.every((byte, index) => head[index] === byte)) invalidFile(`${file.name}：文件内容与扩展名不符`)
+    seen.add(file.name.toLowerCase())
+    checked.push({ file, mime: signature.mime })
+  }
+  if (existing.results.length + checked.length > MAX_COUNT) invalidFile(`最多上传 ${MAX_COUNT} 份材料`)
+  return checked
+}
+
 export async function storeFiles(
   db: D1Database,
   bucket: R2Bucket,
@@ -31,37 +139,21 @@ export async function storeFiles(
   ownerId: string,
   files: File[],
   origin: string,
+  meta: { category?: DocumentCategory; source?: "applicant" | "staff" } = {},
 ) {
-  const existing = await db
-    .prepare("SELECT COUNT(*) AS n FROM attachments WHERE owner_type = ? AND owner_id = ?")
-    .bind(ownerType, ownerId)
-    .first<{ n: number }>()
-  if ((existing?.n ?? 0) + files.length > MAX_COUNT) {
-    const { fail } = await import("./http")
-    fail(400, "VALIDATION_FAILED", `最多上传 ${MAX_COUNT} 个文件。`, { files: `最多 ${MAX_COUNT} 个文件` })
-  }
-  const { id, nowIso } = await import("./crypto")
+  const checked = await checkFiles(db, ownerType, ownerId, files)
   const added = []
-  for (const file of files) {
-    const mime = file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "")
-    if (!ALLOWED.has(mime)) {
-      const { fail } = await import("./http")
-      fail(400, "VALIDATION_FAILED", "仅支持 PDF、JPG、PNG。", { files: "仅支持 PDF、JPG、PNG" })
-    }
-    if (file.size > MAX_BYTES) {
-      const { fail } = await import("./http")
-      fail(400, "VALIDATION_FAILED", "单个文件不能超过 10 MB。", { files: "单个文件不能超过 10 MB" })
-    }
+  for (const { file, mime } of checked) {
     const attachmentId = id("f")
     const key = `${ownerType}/${ownerId}/${attachmentId}`
     await bucket.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: mime } })
     const uploadedAt = nowIso()
     await db
       .prepare(
-        `INSERT INTO attachments (id, owner_type, owner_id, file_name, mime_type, size, r2_key, uploaded_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO attachments (id, owner_type, owner_id, file_name, mime_type, size, r2_key, uploaded_at, category, source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .bind(attachmentId, ownerType, ownerId, file.name, mime, file.size, key, uploadedAt)
+      .bind(attachmentId, ownerType, ownerId, file.name, mime, file.size, key, uploadedAt, meta.category ?? "other", meta.source ?? "applicant")
       .run()
     added.push({ id: attachmentId, fileName: file.name, mimeType: mime, size: file.size, url: `${origin}/api/v1/files/${attachmentId}`, uploadedAt })
   }
@@ -95,6 +187,7 @@ interface AppRow {
   passport_issue_date: string
   passport_expiry_date: string
   review_note: string
+  approval_level: string | null
   file_no: string | null
   submitted_at: string | null
   created_at: string
@@ -106,6 +199,10 @@ export async function readApplication(db: D1Database, row: AppRow, origin: strin
     .prepare("SELECT status, note, actor, at FROM application_timeline WHERE application_id = ? ORDER BY id")
     .bind(row.id)
     .all<{ status: string; note: string; actor: string | null; at: string }>()
+  const approvals = await db
+    .prepare("SELECT * FROM application_approvals WHERE application_id = ? ORDER BY at, rowid")
+    .bind(row.id)
+    .all<{ id: string; level: string | null; action: string; note: string; actor_id: string; actor_name: string; at: string }>()
   return {
     id: row.id,
     applicationNo: row.application_no,
@@ -134,6 +231,16 @@ export async function readApplication(db: D1Database, row: AppRow, origin: strin
     passportExpiryDate: row.passport_expiry_date,
     attachments: await listAttachments(db, "application", row.id, origin),
     reviewNote: row.review_note,
+    approvalLevel: row.status === "under_review" ? (row.approval_level ?? "first_review") : null,
+    approvals: approvals.results.map((a) => ({
+      id: a.id,
+      level: a.level,
+      action: a.action,
+      note: a.note,
+      actorId: a.actor_id,
+      actorName: a.actor_name,
+      at: a.at,
+    })),
     fileNo: row.file_no,
     timeline: timeline.results.map((t) => ({ status: t.status, note: t.note, actor: t.actor, at: t.at })),
     submittedAt: row.submitted_at,

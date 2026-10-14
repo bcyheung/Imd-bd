@@ -32,6 +32,8 @@ async function seedIfEmpty(db: D1Database) {
         "document.create",
         "document.update",
         "document.verify",
+        "application.review",
+        "application.approve",
       ],
       0,
     ],

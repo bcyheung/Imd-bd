@@ -54,10 +54,16 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8787/api/v1
 课程模块图里前端还没接上、但后端已经提供的接口：
 
 - `GET /applications`、`GET /applications/:id`、`POST /applications/:id/decision`
-  - `action`: `start_review` | `request_supplement` | `approve` | `reject`
+  - 初审、终审两级审批：`action` 为 `start_review` | `pass_first_review` | `return_to_first_review` | `request_supplement` | `approve` | `reject`
+  - 申请返回 `approvalLevel` 和 `approvals`（审批意见记录）；初审人不能终审；材料没有全部核验时不能初审通过或通过
   - 通过时如果还没有档案编号，会自动建档并回填 `fileNo`
+- `GET` / `POST /applications/:id/documents`、`DELETE /applications/:id/documents/:documentId`、`PUT /applications/:id/documents/:documentId/verification`
+  - 申请材料列表、窗口代传扫描件、标记核验通过或驳回
+  - 所有上传入口都在服务端校验格式、文件头、空文件、大小、重名和份数
 - `GET /reports`：申请量、通过率、平均处理天数
 - `GET /notifications`、`POST /notifications/:id/read`（门户路径前加 `/portal`）
 - `GET /audit-logs`：登录、审批、建档等写操作
 
 越权读取别人的门户申请返回 404。
+
+新增权限码 `application.review`（受理与初审）、`application.approve`（终审），内置的系统管理员和签证审核官两种角色默认都有。已有数据库执行 `npm run db:migrate` 后会自动补上。

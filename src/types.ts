@@ -14,6 +14,8 @@ export type PermissionCode =
   | "user.manage"
   | "role.read"
   | "role.manage"
+  | "application.review"
+  | "application.approve"
 
 export interface Env {
   DB: D1Database

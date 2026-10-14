@@ -40,7 +40,7 @@ export async function notifyOfficers(db: D1Database, title: string, body: string
        FROM users u
        JOIN user_roles ur ON ur.user_id = u.id
        JOIN roles r ON r.id = ur.role_id
-       WHERE u.status = 'active' AND r.permissions LIKE '%applicant.update%'`,
+       WHERE u.status = 'active' AND r.permissions LIKE '%"application.review"%'`,
     )
     .all<{ id: string }>()
   for (const row of rows.results) await notify(db, "staff", row.id, title, body)
