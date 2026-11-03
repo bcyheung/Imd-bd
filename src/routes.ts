@@ -1,11 +1,12 @@
 import { Hono, type Context } from "hono"
 
 import { audit } from "./audit"
-import { hashPassword, id, nowIso, signToken, verifyPassword } from "./crypto"
+import { hashPassword, id, nowIso, signToken, today, verifyPassword } from "./crypto"
 import { conflict, fail, forbidden, like, noContent, notFound, originOf, pageQuery } from "./http"
 import { permit, portalOf, requirePortal, requireStaff, staffOf } from "./middleware"
 import { notify, notifyStaffWith, toNotification, type RecipientType } from "./notifications"
 import { PERMISSIONS } from "./permissions"
+import { checkByType } from "./requirements"
 import {
   countUnverifiedDocuments,
   DOCUMENT_CATEGORIES,
@@ -1106,6 +1107,8 @@ api.post("/portal/applications/:id/submit", requirePortal, async (c) => {
     if (!application[field]) fieldErrors[field] = message
   }
   if (!application.attachments.length) fieldErrors.attachments = "请至少上传一份申请材料"
+  // 必填齊了再按類型核對；已有的缺欄位提示優先
+  if (!Object.keys(fieldErrors).length) Object.assign(fieldErrors, checkByType(application, today()))
   if (Object.keys(fieldErrors).length) fail(400, "VALIDATION_FAILED", "申请信息不完整，请补全后再提交。", fieldErrors)
   const year = new Date().getFullYear()
   let serial = await nextCounter(c.env.DB, "application", 1)
