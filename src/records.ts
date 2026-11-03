@@ -22,11 +22,19 @@ export function fileUrl(origin: string, attachment: { id: string; r2_key: string
 export async function listAttachments(db: D1Database, ownerType: string, ownerId: string, origin: string) {
   const rows = await db
     .prepare(
-      `SELECT id, file_name, mime_type, size, r2_key, uploaded_at
+      `SELECT id, file_name, mime_type, size, r2_key, uploaded_at, requirement
        FROM attachments WHERE owner_type = ? AND owner_id = ? ORDER BY uploaded_at`,
     )
     .bind(ownerType, ownerId)
-    .all<{ id: string; file_name: string; mime_type: string; size: number; r2_key: string | null; uploaded_at: string }>()
+    .all<{
+      id: string
+      file_name: string
+      mime_type: string
+      size: number
+      r2_key: string | null
+      uploaded_at: string
+      requirement: string | null
+    }>()
   return rows.results.map((row) => ({
     id: row.id,
     fileName: row.file_name,
@@ -34,6 +42,7 @@ export async function listAttachments(db: D1Database, ownerType: string, ownerId
     size: row.size,
     url: fileUrl(origin, row),
     uploadedAt: row.uploaded_at,
+    requirement: row.requirement,
   }))
 }
 
@@ -46,6 +55,7 @@ interface DocumentRow {
   r2_key: string | null
   uploaded_at: string
   category: string
+  requirement: string | null
   source: string
   verification: string
   verification_note: string
@@ -63,6 +73,7 @@ function toApplicationDocument(row: DocumentRow, origin: string) {
     url: fileUrl(origin, row),
     uploadedAt: row.uploaded_at,
     category: row.category,
+    requirement: row.requirement,
     source: row.source,
     verification: row.verification,
     verificationNote: row.verification_note,
@@ -139,7 +150,7 @@ export async function storeFiles(
   ownerId: string,
   files: File[],
   origin: string,
-  meta: { category?: DocumentCategory; source?: "applicant" | "staff" } = {},
+  meta: { category?: DocumentCategory; requirement?: string | null; source?: "applicant" | "staff" } = {},
 ) {
   const checked = await checkFiles(db, ownerType, ownerId, files)
   const added = []
@@ -150,12 +161,32 @@ export async function storeFiles(
     const uploadedAt = nowIso()
     await db
       .prepare(
-        `INSERT INTO attachments (id, owner_type, owner_id, file_name, mime_type, size, r2_key, uploaded_at, category, source)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO attachments (id, owner_type, owner_id, file_name, mime_type, size, r2_key, uploaded_at, category, requirement, source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .bind(attachmentId, ownerType, ownerId, file.name, mime, file.size, key, uploadedAt, meta.category ?? "other", meta.source ?? "applicant")
+      .bind(
+        attachmentId,
+        ownerType,
+        ownerId,
+        file.name,
+        mime,
+        file.size,
+        key,
+        uploadedAt,
+        meta.category ?? "other",
+        meta.requirement ?? null,
+        meta.source ?? "applicant",
+      )
       .run()
-    added.push({ id: attachmentId, fileName: file.name, mimeType: mime, size: file.size, url: `${origin}/api/v1/files/${attachmentId}`, uploadedAt })
+    added.push({
+      id: attachmentId,
+      fileName: file.name,
+      mimeType: mime,
+      size: file.size,
+      url: `${origin}/api/v1/files/${attachmentId}`,
+      uploadedAt,
+      requirement: meta.requirement ?? null,
+    })
   }
   return added
 }
