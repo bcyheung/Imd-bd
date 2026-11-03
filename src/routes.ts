@@ -6,7 +6,7 @@ import { conflict, fail, forbidden, like, noContent, notFound, originOf, pageQue
 import { permit, portalOf, requirePortal, requireStaff, staffOf } from "./middleware"
 import { notify, notifyStaffWith, toNotification, type RecipientType } from "./notifications"
 import { PERMISSIONS } from "./permissions"
-import { checkByType } from "./requirements"
+import { checkByType, findRequirement } from "./requirements"
 import {
   countUnverifiedDocuments,
   DOCUMENT_CATEGORIES,
@@ -1173,7 +1173,16 @@ api.post("/portal/applications/:id/attachments", requirePortal, async (c) => {
   if (application.status !== "draft") conflict("申请已提交，不能再修改。如需变更请先撤回申请或联系受理机关。")
   const form = await c.req.formData()
   const files = form.getAll("files").filter((file): file is File => file instanceof File)
-  const added = await storeFiles(c.env.DB, c.env.FILES, "application", application.id, files, originOf(c))
+  // requirement 為清單項；分類由清單決定，不採用請求裡的 category。舊版前端不傳時照舊存為 other
+  const key = form.get("requirement")
+  const requirement = typeof key === "string" && key ? findRequirement(application.type, key) : null
+  if (typeof key === "string" && key && !requirement) {
+    fail(400, "VALIDATION_FAILED", "材料项不属于该申请类型。", { requirement: "材料项不属于该申请类型" })
+  }
+  const added = await storeFiles(c.env.DB, c.env.FILES, "application", application.id, files, originOf(c), {
+    category: requirement?.category,
+    requirement: requirement?.key,
+  })
   await c.env.DB.prepare("UPDATE applications SET updated_at = ? WHERE id = ?").bind(nowIso(), application.id).run()
   return c.json(added, 201)
 })
