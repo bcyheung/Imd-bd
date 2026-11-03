@@ -6,6 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 # 本地可直接跑。上线前用 `wrangler secret put JWT_SECRET` 覆盖。
 [vars]
 JWT_SECRET = "ims-dev-change-me"
+# 邮件提醒：MAIL_WEBHOOK_URL 指向邮件网关，可选 MAIL_WEBHOOK_TOKEN（用 secret 配置）和 MAIL_FROM。
 
 [[d1_databases]]
 binding = "DB"
@@ -16,3 +17,7 @@ migrations_dir = "migrations"
 [[r2_buckets]]
 binding = "FILES"
 bucket_name = "ims-files"
+
+# 每 5 分钟补投一次待发邮件（未配置 MAIL_WEBHOOK_URL 时不做任何事）。
+[triggers]
+crons = ["*/5 * * * *"]

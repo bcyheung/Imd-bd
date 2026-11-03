@@ -60,8 +60,10 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8787/api/v1
 - `GET` / `POST /applications/:id/documents`、`DELETE /applications/:id/documents/:documentId`、`PUT /applications/:id/documents/:documentId/verification`
   - 申请材料列表、窗口代传扫描件、标记核验通过或驳回
   - 所有上传入口都在服务端校验格式、文件头、空文件、大小、重名和份数
-- `GET /reports`：申请量、通过率、平均处理天数
-- `GET /notifications`、`POST /notifications/:id/read`（门户路径前加 `/portal`）
+- `GET /reports?from&to`：申请量、通过率、平均处理天数、按日或按月趋势、按类型、审批人工作量、在办与超期
+- `GET /notifications`、`POST /notifications/:id/read`、`POST /notifications/read-all`、`GET` / `PUT /notifications/preferences`（门户路径前加 `/portal`）
+  - 通知带 `category` 和 `link`，提交、初审通过、退回、补件、办结、材料驳回、账号申请都会通知相关的人
+  - 邮件提醒：配置 `MAIL_WEBHOOK_URL`（可选 `MAIL_WEBHOOK_TOKEN`、`MAIL_FROM`）后投递，见 [API.md](./API.md#郵件提醒)
 - `GET /audit-logs`：登录、审批、建档等写操作
 
 越权读取别人的门户申请返回 404。

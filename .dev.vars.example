@@ -1,1 +1,5 @@
 JWT_SECRET=replace-with-a-long-random-string
+# 可选：邮件提醒网关，POST JSON { to, subject, text, from? }
+# MAIL_WEBHOOK_URL=https://mail-gateway.example/send
+# MAIL_WEBHOOK_TOKEN=
+# MAIL_FROM=noreply@nia.gov.example

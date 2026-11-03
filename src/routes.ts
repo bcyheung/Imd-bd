@@ -1,9 +1,10 @@
-import { Hono } from "hono"
+import { Hono, type Context } from "hono"
 
-import { audit, notify, notifyOfficers } from "./audit"
+import { audit } from "./audit"
 import { hashPassword, id, nowIso, signToken, verifyPassword } from "./crypto"
 import { conflict, fail, forbidden, like, noContent, notFound, originOf, pageQuery } from "./http"
 import { permit, portalOf, requirePortal, requireStaff, staffOf } from "./middleware"
+import { notify, notifyStaffWith, toNotification, type RecipientType } from "./notifications"
 import { PERMISSIONS } from "./permissions"
 import {
   countUnverifiedDocuments,
@@ -63,6 +64,12 @@ api.post("/auth/register", async (c) => {
     .bind(userId, body.username, await hashPassword(body.password), body.fullName, body.employeeId, body.department, body.email, body.phone, createdAt)
     .run()
   await audit(c.env.DB, { type: "system", id: null, name: body.fullName }, "auth.register", "user", userId, "提交账号申请")
+  await notifyStaffWith(c.env.DB, "user.manage", {
+    title: "有新的账号申请待审核",
+    body: `${body.fullName}（${body.employeeId}，${body.department}）申请开通账号。`,
+    category: "account",
+    link: "/admin/users?status=pending",
+  })
   const user = await loadStaff(c.env.DB, userId)
   return c.json(publicStaff(user!), 201)
 })
@@ -152,7 +159,12 @@ api.put("/users/:id/status", requireStaff, permit("user.manage"), async (c) => {
   await c.env.DB.prepare("UPDATE users SET status = ? WHERE id = ?").bind(body.status, user.id).run()
   if (body.roleIds) await replaceRoles(c.env.DB, user.id, body.roleIds)
   if (body.status === "active" && user.status === "pending") {
-    await notify(c.env.DB, "staff", user.id, "账号已通过审核", "你可以登录移民管理系统。")
+    await notify(c.env.DB, "staff", user.id, {
+      title: "账号已通过审核",
+      body: "你可以登录移民管理系统。",
+      category: "account",
+      link: "/dashboard",
+    })
   }
   await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "user.status", "user", user.id, `将 ${user.username} 设为 ${body.status}`)
   return c.json(publicStaff((await loadStaff(c.env.DB, user.id))!))
@@ -459,9 +471,9 @@ const DOCUMENT_EDITABLE_STATUSES = ["submitted", "under_review", "supplement_req
 
 async function editableApplication(db: D1Database, applicationId: string) {
   const application = await db
-    .prepare("SELECT id, application_no, status FROM applications WHERE id = ?")
+    .prepare("SELECT id, application_no, status, account_id FROM applications WHERE id = ?")
     .bind(applicationId)
-    .first<{ id: string; application_no: string | null; status: string }>()
+    .first<{ id: string; application_no: string | null; status: string; account_id: string }>()
   if (!application) notFound("申请")
   if (!DOCUMENT_EDITABLE_STATUSES.includes(application.status)) conflict("申请已办结或尚未提交，材料不能修改。")
   return application
@@ -525,6 +537,14 @@ api.put("/applications/:id/documents/:documentId/verification", requireStaff, pe
     .run()
   await c.env.DB.prepare("UPDATE applications SET updated_at = ? WHERE id = ?").bind(at, application.id).run()
   await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "application.document.verify", "application", application.id, `核验材料 ${doc.fileName}：${body.verification}`)
+  if (body.verification === "rejected") {
+    await notify(c.env.DB, "portal", application.account_id, {
+      title: "申请材料未通过核验",
+      body: `${application.application_no ?? "你的申请"}：${doc.fileName} 未通过核验。原因：${note}`,
+      category: "document",
+      link: `/portal/applications/${application.id}`,
+    })
+  }
   return c.json(await getApplicationDocument(c.env.DB, application.id, doc.id, originOf(c)))
 })
 
@@ -651,8 +671,8 @@ api.post("/applications/:id/decision", requireStaff, async (c) => {
   }
   const reviewNote = PUBLIC_NOTE_ACTIONS.includes(body.action) ? note || application.reviewNote : application.reviewNote
   await c.env.DB
-    .prepare("UPDATE applications SET status = ?, approval_level = ?, review_note = ?, file_no = ?, updated_at = ? WHERE id = ?")
-    .bind(next, nextLevel, reviewNote, fileNo, at, application.id)
+    .prepare("UPDATE applications SET status = ?, approval_level = ?, review_note = ?, file_no = ?, decided_at = ?, updated_at = ? WHERE id = ?")
+    .bind(next, nextLevel, reviewNote, fileNo, next === "approved" || next === "rejected" ? at : null, at, application.id)
     .run()
   await c.env.DB
     .prepare(
@@ -666,62 +686,267 @@ api.post("/applications/:id/decision", requireStaff, async (c) => {
       .prepare("INSERT INTO application_timeline (application_id, status, note, actor, at) VALUES (?, ?, ?, ?, ?)")
       .bind(application.id, next, timelineNote, me.fullName, at)
       .run()
-    await notify(c.env.DB, "portal", application.accountId, "申请状态已更新", `${application.applicationNo ?? "你的申请"}：${timelineNote}`)
+    await notify(c.env.DB, "portal", application.accountId, {
+      title: "申请状态已更新",
+      body: `${application.applicationNo ?? "你的申请"}：${timelineNote}`,
+      category: "application",
+      link: `/portal/applications/${application.id}`,
+    })
+  }
+  const staffLink = `/applications/${application.id}`
+  if (body.action === "pass_first_review") {
+    // 初审人不能终审，不必通知自己
+    await notifyStaffWith(c.env.DB, "application.approve", {
+      title: "有申请待终审",
+      body: `${application.applicationNo} 已由 ${me.fullName} 初审通过。`,
+      category: "application",
+      link: staffLink,
+    }, me.id)
+  }
+  if (body.action === "return_to_first_review") {
+    const firstReview = [...application.approvals].reverse().find((record) => record.action === "pass_first_review")
+    if (firstReview && firstReview.actorId !== me.id) {
+      await notify(c.env.DB, "staff", firstReview.actorId, {
+        title: "申请被退回初审",
+        body: `${application.applicationNo}：${note}`,
+        category: "application",
+        link: staffLink,
+      })
+    }
   }
   await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "application.decision", "application", application.id, `${body.action} ${application.applicationNo}`)
   return c.json(await getApplication(c.env.DB, application.id, originOf(c)))
 })
 
+const PENDING_STATUSES = ["submitted", "under_review", "supplement_required"]
+/** 待受理、审核中超过该天数视为超期；待补件在等申请人，不计入。 */
+const SLA_DAYS = 15
+const DAY_MS = 86_400_000
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+
+function parseDay(value: string | undefined, field: string) {
+  if (!value) return null
+  if (!DATE_RE.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) {
+    fail(400, "VALIDATION_FAILED", "日期格式应为 yyyy-MM-dd。", { [field]: "日期格式应为 yyyy-MM-dd" })
+  }
+  return value
+}
+
+/** 按日或按月列出 from..to 之间的所有区间键，保证趋势图没有缺口。 */
+function periodKeys(from: string, to: string, granularity: "day" | "month") {
+  const keys: string[] = []
+  if (granularity === "day") {
+    for (let t = Date.parse(`${from}T00:00:00Z`); t <= Date.parse(`${to}T00:00:00Z`); t += DAY_MS) {
+      keys.push(new Date(t).toISOString().slice(0, 10))
+    }
+    return keys
+  }
+  let [year, month] = from.slice(0, 7).split("-").map(Number)
+  const end = to.slice(0, 7)
+  for (;;) {
+    const key = `${year}-${String(month).padStart(2, "0")}`
+    keys.push(key)
+    if (key >= end) return keys
+    month += 1
+    if (month > 12) {
+      month = 1
+      year += 1
+    }
+  }
+}
+
+function round1(value: number) {
+  return Math.round(value * 10) / 10
+}
+
 api.get("/reports", requireStaff, permit("applicant.read"), async (c) => {
-  const rows = await c.env.DB.prepare("SELECT status, type, submitted_at, updated_at FROM applications").all<{
-    status: string
-    type: string
-    submitted_at: string | null
-    updated_at: string
-  }>()
+  const fromParam = parseDay(c.req.query("from"), "from")
+  const toParam = parseDay(c.req.query("to"), "to")
+  if (fromParam && toParam && fromParam > toParam) {
+    fail(400, "VALIDATION_FAILED", "开始日期不能晚于结束日期。", { from: "开始日期不能晚于结束日期" })
+  }
+  const rows = await c.env.DB
+    .prepare("SELECT type, status, submitted_at, created_at, decided_at, updated_at FROM applications")
+    .all<{ type: string; status: string; submitted_at: string | null; created_at: string; decided_at: string | null; updated_at: string }>()
+  const today = new Date().toISOString().slice(0, 10)
+  // 申请日期：已提交的取提交时间，草稿取创建时间
+  const dayOf = (row: { submitted_at: string | null; created_at: string }) => (row.submitted_at ?? row.created_at).slice(0, 10)
+  const decidedOf = (row: { status: string; decided_at: string | null; updated_at: string }) =>
+    row.status === "approved" || row.status === "rejected" ? (row.decided_at ?? row.updated_at) : null
+
+  const earliest = rows.results.reduce<string | null>((min, row) => (!min || dayOf(row) < min ? dayOf(row) : min), null)
+  const from = fromParam ?? earliest ?? new Date(Date.now() - 180 * DAY_MS).toISOString().slice(0, 10)
+  const to = toParam ?? today
+  const inRange = (day: string) => day >= from && day <= to
+  const spanDays = (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS + 1
+  const granularity = spanDays <= 62 ? "day" : "month"
+  const periodOf = (iso: string) => (granularity === "day" ? iso.slice(0, 10) : iso.slice(0, 7))
+
+  const trend = new Map(periodKeys(from, to, granularity).map((period) => [period, { period, submitted: 0, approved: 0, rejected: 0 }]))
   const byStatus: Record<string, number> = {}
   const byType: Record<string, number> = {}
+  const types = new Map<string, { type: string; total: number; approved: number; rejected: number; days: number; finished: number }>()
+  let total = 0
+  let submitted = 0
   let approved = 0
   let rejected = 0
   let days = 0
   let finished = 0
+  let backlog = 0
+  let overdue = 0
+  const now = Date.now()
+
   for (const row of rows.results) {
+    // 积压是当前快照，不受统计范围影响
+    if (PENDING_STATUSES.includes(row.status)) {
+      backlog += 1
+      if (row.status !== "supplement_required" && row.submitted_at && now - Date.parse(row.submitted_at) > SLA_DAYS * DAY_MS) overdue += 1
+    }
+    const decidedAt = decidedOf(row)
+    if (decidedAt && inRange(decidedAt.slice(0, 10))) {
+      const point = trend.get(periodOf(decidedAt))
+      if (point) point[row.status as "approved" | "rejected"] += 1
+    }
+    if (row.submitted_at && inRange(row.submitted_at.slice(0, 10))) {
+      const point = trend.get(periodOf(row.submitted_at))
+      if (point) point.submitted += 1
+    }
+
+    if (!inRange(dayOf(row))) continue
+    total += 1
+    if (row.submitted_at) submitted += 1
     byStatus[row.status] = (byStatus[row.status] ?? 0) + 1
     byType[row.type] = (byType[row.type] ?? 0) + 1
-    if (row.status === "approved") approved += 1
-    if (row.status === "rejected") rejected += 1
-    if ((row.status === "approved" || row.status === "rejected") && row.submitted_at) {
-      days += (Date.parse(row.updated_at) - Date.parse(row.submitted_at)) / 86_400_000
+    const type = types.get(row.type) ?? { type: row.type, total: 0, approved: 0, rejected: 0, days: 0, finished: 0 }
+    types.set(row.type, type)
+    type.total += 1
+    if (row.status === "approved") {
+      approved += 1
+      type.approved += 1
+    }
+    if (row.status === "rejected") {
+      rejected += 1
+      type.rejected += 1
+    }
+    if (decidedAt && row.submitted_at) {
+      const spent = (Date.parse(decidedAt) - Date.parse(row.submitted_at)) / DAY_MS
+      days += spent
       finished += 1
+      type.days += spent
+      type.finished += 1
     }
   }
+
+  const reviewers = await c.env.DB
+    .prepare(
+      `SELECT actor_id, actor_name, COUNT(*) AS decisions,
+         SUM(CASE WHEN action = 'approve' THEN 1 ELSE 0 END) AS approved,
+         SUM(CASE WHEN action = 'reject' THEN 1 ELSE 0 END) AS rejected
+       FROM application_approvals
+       WHERE substr(at, 1, 10) BETWEEN ? AND ?
+       GROUP BY actor_id, actor_name
+       ORDER BY decisions DESC, actor_name
+       LIMIT 20`,
+    )
+    .bind(from, to)
+    .all<{ actor_id: string; actor_name: string; decisions: number; approved: number; rejected: number }>()
+
   const decided = approved + rejected
   return c.json({
-    applicationTotal: rows.results.length,
+    range: { from, to },
+    granularity,
+    applicationTotal: total,
+    submittedTotal: submitted,
+    approvedTotal: approved,
+    rejectedTotal: rejected,
     approvalRate: decided ? approved / decided : null,
-    averageProcessingDays: finished ? Math.round((days / finished) * 10) / 10 : null,
+    averageProcessingDays: finished ? round1(days / finished) : null,
     byStatus,
     byType,
+    types: [...types.values()]
+      .sort((a, b) => b.total - a.total)
+      .map((type) => ({
+        type: type.type,
+        total: type.total,
+        approved: type.approved,
+        rejected: type.rejected,
+        approvalRate: type.approved + type.rejected ? type.approved / (type.approved + type.rejected) : null,
+        averageProcessingDays: type.finished ? round1(type.days / type.finished) : null,
+      })),
+    trend: [...trend.values()],
+    reviewers: reviewers.results.map((row) => ({
+      actorId: row.actor_id,
+      actorName: row.actor_name,
+      decisions: row.decisions,
+      approved: row.approved,
+      rejected: row.rejected,
+    })),
+    backlog: { total: backlog, overdue, slaDays: SLA_DAYS },
+    generatedAt: nowIso(),
   })
 })
 
-api.get("/notifications", requireStaff, async (c) => {
-  const me = staffOf(c)
-  const rows = await c.env.DB
-    .prepare("SELECT * FROM notifications WHERE recipient_type = 'staff' AND recipient_id = ? ORDER BY created_at DESC LIMIT 50")
-    .bind(me.id)
-    .all()
-  return c.json(rows.results.map(toNotification))
-})
+/* ---------- 通知：工作人员与门户共用，按登录域区分收件人 ---------- */
 
-api.post("/notifications/:id/read", requireStaff, async (c) => {
-  const me = staffOf(c)
-  await c.env.DB
-    .prepare("UPDATE notifications SET read_at = ? WHERE id = ? AND recipient_type = 'staff' AND recipient_id = ?")
-    .bind(nowIso(), c.req.param("id"), me.id)
-    .run()
-  return noContent(c)
-})
+type NotificationContext = Context<AppEnv>
+
+function recipientOf(c: NotificationContext, realm: RecipientType) {
+  return realm === "staff" ? staffOf(c).id : portalOf(c).id
+}
+
+function notificationRoutes(prefix: string, realm: RecipientType, guard: typeof requireStaff) {
+  const table = realm === "staff" ? "users" : "applicant_accounts"
+
+  api.get(`${prefix}/notifications`, guard, async (c) => {
+    const unreadOnly = c.req.query("unread") === "true"
+    const rows = await c.env.DB
+      .prepare(
+        `SELECT * FROM notifications
+         WHERE recipient_type = ? AND recipient_id = ? AND (? = 0 OR read_at IS NULL)
+         ORDER BY created_at DESC LIMIT 50`,
+      )
+      .bind(realm, recipientOf(c, realm), unreadOnly ? 1 : 0)
+      .all()
+    return c.json(rows.results.map(toNotification))
+  })
+
+  api.post(`${prefix}/notifications/read-all`, guard, async (c) => {
+    await c.env.DB
+      .prepare("UPDATE notifications SET read_at = ? WHERE recipient_type = ? AND recipient_id = ? AND read_at IS NULL")
+      .bind(nowIso(), realm, recipientOf(c, realm))
+      .run()
+    return noContent(c)
+  })
+
+  api.post(`${prefix}/notifications/:id/read`, guard, async (c) => {
+    await c.env.DB
+      .prepare("UPDATE notifications SET read_at = COALESCE(read_at, ?) WHERE id = ? AND recipient_type = ? AND recipient_id = ?")
+      .bind(nowIso(), c.req.param("id"), realm, recipientOf(c, realm))
+      .run()
+    return noContent(c)
+  })
+
+  api.get(`${prefix}/notifications/preferences`, guard, async (c) => {
+    return c.json(await readPreferences(c.env.DB, table, recipientOf(c, realm)))
+  })
+
+  api.put(`${prefix}/notifications/preferences`, guard, async (c) => {
+    const body = await c.req.json<{ emailEnabled?: unknown }>()
+    if (typeof body.emailEnabled !== "boolean") {
+      fail(400, "VALIDATION_FAILED", "请选择是否开启邮件提醒。", { emailEnabled: "请选择是否开启邮件提醒" })
+    }
+    const recipientId = recipientOf(c, realm)
+    await c.env.DB.prepare(`UPDATE ${table} SET email_notifications = ? WHERE id = ?`).bind(body.emailEnabled ? 1 : 0, recipientId).run()
+    return c.json(await readPreferences(c.env.DB, table, recipientId))
+  })
+}
+
+async function readPreferences(db: D1Database, table: string, recipientId: string) {
+  const row = await db.prepare(`SELECT email, email_notifications FROM ${table} WHERE id = ?`).bind(recipientId).first<{ email: string; email_notifications: number }>()
+  return { emailEnabled: Boolean(row?.email_notifications), email: row?.email ?? "" }
+}
+
+notificationRoutes("", "staff", requireStaff)
 
 api.get("/audit-logs", requireStaff, permit("user.read", "role.read"), async (c) => {
   const { page, pageSize, offset } = pageQuery(c)
@@ -899,7 +1124,12 @@ api.post("/portal/applications/:id/submit", requirePortal, async (c) => {
     .bind(application.id, at)
     .run()
   const account = portalOf(c)
-  await notifyOfficers(c.env.DB, "有新的申请待受理", `${applicationNo} 已提交。`)
+  await notifyStaffWith(c.env.DB, "application.review", {
+    title: "有新的申请待受理",
+    body: `${applicationNo} 已提交。`,
+    category: "application",
+    link: `/applications/${application.id}`,
+  })
   await audit(c.env.DB, { type: "portal", id: account.id, name: account.fullName }, "application.submit", "application", application.id, `提交 ${applicationNo}`)
   return c.json(await getApplication(c.env.DB, application.id, originOf(c)))
 })
@@ -914,6 +1144,14 @@ api.post("/portal/applications/:id/withdraw", requirePortal, async (c) => {
     .prepare("INSERT INTO application_timeline (application_id, status, note, actor, at) VALUES (?, 'withdrawn', '申请人主动撤回申请。', NULL, ?)")
     .bind(application.id, at)
     .run()
+  if (application.status === "under_review") {
+    await notifyStaffWith(c.env.DB, "application.review", {
+      title: "申请已被撤回",
+      body: `${application.applicationNo} 在审核中被申请人撤回。`,
+      category: "application",
+      link: `/applications/${application.id}`,
+    })
+  }
   return c.json(await getApplication(c.env.DB, application.id, originOf(c)))
 })
 
@@ -945,23 +1183,7 @@ api.delete("/portal/applications/:id/attachments/:attachmentId", requirePortal, 
   return noContent(c)
 })
 
-api.get("/portal/notifications", requirePortal, async (c) => {
-  const account = portalOf(c)
-  const rows = await c.env.DB
-    .prepare("SELECT * FROM notifications WHERE recipient_type = 'portal' AND recipient_id = ? ORDER BY created_at DESC LIMIT 50")
-    .bind(account.id)
-    .all()
-  return c.json(rows.results.map(toNotification))
-})
-
-api.post("/portal/notifications/:id/read", requirePortal, async (c) => {
-  const account = portalOf(c)
-  await c.env.DB
-    .prepare("UPDATE notifications SET read_at = ? WHERE id = ? AND recipient_type = 'portal' AND recipient_id = ?")
-    .bind(nowIso(), c.req.param("id"), account.id)
-    .run()
-  return noContent(c)
-})
+notificationRoutes("/portal", "portal", requirePortal)
 
 async function ownApplication(c: Parameters<typeof portalOf>[0]) {
   const account = portalOf(c)
@@ -1056,16 +1278,6 @@ function toRole(row: Record<string, string | number>) {
     builtIn: Boolean(row.built_in),
     userCount: Number(row.user_count),
     updatedAt: row.updated_at,
-  }
-}
-
-function toNotification(row: Record<string, unknown>) {
-  return {
-    id: row.id,
-    title: row.title,
-    body: row.body,
-    readAt: row.read_at,
-    createdAt: row.created_at,
   }
 }
 

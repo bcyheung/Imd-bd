@@ -21,6 +21,10 @@ export interface Env {
   DB: D1Database
   FILES: R2Bucket
   JWT_SECRET: string
+  /** 邮件网关地址；不配置时只发站内通知，邮件留在 email_outbox */
+  MAIL_WEBHOOK_URL?: string
+  MAIL_WEBHOOK_TOKEN?: string
+  MAIL_FROM?: string
 }
 
 export interface StaffUser {

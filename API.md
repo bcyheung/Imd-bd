@@ -349,29 +349,88 @@ Content-Type: application/json
 
 `mimeType` 按副檔名決定，不採用瀏覽器傳來的類型。
 
-### 報表、通知、審計
+### 報表
 
 `GET /reports`　需要 `applicant.read`。
 
+| 參數 | 說明 |
+| --- | --- |
+| `from` | 開始日期 `yyyy-MM-dd`，含當天。不傳時從最早一份申請開始 |
+| `to` | 結束日期 `yyyy-MM-dd`，含當天。不傳時到今天 |
+
+日期格式錯誤或 `from` 晚於 `to` 回 `400 VALIDATION_FAILED`。日期按 UTC 計算。
+
 ```json
 {
-  "applicationTotal": 0,
-  "approvalRate": null,
-  "averageProcessingDays": null,
-  "byStatus": {},
-  "byType": {}
+  "range": { "from": "2026-09-27", "to": "2026-10-26" },
+  "granularity": "day",
+  "applicationTotal": 14,
+  "submittedTotal": 14,
+  "approvedTotal": 7,
+  "rejectedTotal": 2,
+  "approvalRate": 0.778,
+  "averageProcessingDays": 9.9,
+  "byStatus": { "approved": 7, "submitted": 3 },
+  "byType": { "visa": 6 },
+  "types": [
+    { "type": "visa", "total": 6, "approved": 3, "rejected": 1, "approvalRate": 0.75, "averageProcessingDays": 8.2 }
+  ],
+  "trend": [{ "period": "2026-09-27", "submitted": 1, "approved": 0, "rejected": 0 }],
+  "reviewers": [{ "actorId": "u-001", "actorName": "林書遠", "decisions": 8, "approved": 4, "rejected": 1 }],
+  "backlog": { "total": 17, "overdue": 4, "slaDays": 15 },
+  "generatedAt": "2026-10-26T03:07:00.000Z"
 }
 ```
 
-通過率是「已通過 /（已通過 + 已駁回）」。平均處理天數是從提交到通過或駁回。還沒有終態申請時這兩個值是 `null`。
+- 申請量、狀態分布、按類型統計：申請日期落在範圍內的申請。申請日期是提交時間，草稿用建立時間。
+- 通過率是「已通過 /（已通過 + 已駁回）」。平均處理天數是從提交到辦結（`decided_at`）。還沒有終態申請時這兩個值是 `null`。
+- `trend`：範圍不超過 62 天按日（`yyyy-MM-dd`），否則按月（`yyyy-MM`），沒有資料的區間補 0。提交量按提交日、通過與駁回按辦結日歸入區間。
+- `reviewers`：範圍內每位工作人員作出的審批決定數（含受理、初審、退回），最多 20 人。
+- `backlog`：目前在辦（待受理、審核中、待補件）的快照，不受範圍影響。`overdue` 是提交超過 15 天、仍待受理或審核中的申請；待補件在等申請人，不計入。
+
+### 通知
 
 | 方法 | 路徑 | 權限 | 說明 |
 | --- | --- | --- | --- |
-| `GET` | `/notifications` | 已登入 | 最近 50 則，新的在前 |
+| `GET` | `/notifications` | 已登入 | 最近 50 則，新的在前。`unread=true` 只回未讀 |
 | `POST` | `/notifications/:id/read` | 已登入 | 標為已讀，`204` |
+| `POST` | `/notifications/read-all` | 已登入 | 全部標為已讀，`204` |
+| `GET` | `/notifications/preferences` | 已登入 | `{ emailEnabled, email }` |
+| `PUT` | `/notifications/preferences` | 已登入 | `{ emailEnabled: boolean }`，回傳更新後的設定 |
+
+通知：`id`、`title`、`body`、`category`（`application` / `document` / `account` / `system`）、`link`（前端站內路徑，可為 `null`）、`readAt`、`createdAt`。
+
+| 事件 | 收件人 | 連結 |
+| --- | --- | --- |
+| 工作人員自助註冊 | 有 `user.manage` 的工作人員 | `/admin/users?status=pending` |
+| 帳號審核通過 | 該工作人員 | `/dashboard` |
+| 申請人提交申請 | 有 `application.review` 的工作人員 | `/applications/:id` |
+| 初審通過 | 有 `application.approve` 的工作人員（初審人除外） | `/applications/:id` |
+| 退回初審 | 最近一次初審通過的人 | `/applications/:id` |
+| 審核中被申請人撤回 | 有 `application.review` 的工作人員 | `/applications/:id` |
+| 受理、要求補件、通過、駁回 | 申請人 | `/portal/applications/:id` |
+| 申請材料核驗駁回 | 申請人 | `/portal/applications/:id` |
+
+#### 郵件提醒
+
+每則通知在收件人開啟郵件提醒（預設開啟）且有郵箱時，會排入 `email_outbox`。設定 `MAIL_WEBHOOK_URL` 後，寫入請求結束時和每 5 分鐘的定時任務會投遞待發郵件：
+
+```http
+POST {MAIL_WEBHOOK_URL}
+Authorization: Bearer {MAIL_WEBHOOK_TOKEN}   # 有設定時才帶
+Content-Type: application/json
+
+{ "to": "...", "subject": "...", "text": "...", "from": "{MAIL_FROM}" }
+```
+
+回 2xx 算送達；失敗會重試，5 次後標為 `failed`。沒有設定 `MAIL_WEBHOOK_URL` 時只發站內通知，郵件留在佇列裡。
+
+### 審計
+
+| 方法 | 路徑 | 權限 | 說明 |
+| --- | --- | --- | --- |
 | `GET` | `/audit-logs` | `user.read` 或 `role.read` | 分頁。`keyword` 搜尋操作人、動作、說明 |
 
-通知：`id`、`title`、`body`、`readAt`、`createdAt`。  
 審計：`id`、`actorType`（`staff` / `portal` / `system`）、`actorId`、`actorName`、`action`、`resourceType`、`resourceId`、`detail`、`createdAt`。
 
 ### 下載檔案
@@ -481,7 +540,9 @@ Content-Type: application/json
 
 | 方法 | 路徑 | 說明 |
 | --- | --- | --- |
-| `GET` | `/portal/notifications` | 最近 50 則 |
+| `GET` | `/portal/notifications` | 最近 50 則，`unread=true` 只回未讀 |
 | `POST` | `/portal/notifications/:id/read` | 標為已讀，`204` |
+| `POST` | `/portal/notifications/read-all` | 全部標為已讀，`204` |
+| `GET` / `PUT` | `/portal/notifications/preferences` | 郵件提醒設定，格式同工作人員 |
 
 形狀和工作人員通知相同。審批結果會寫到這裡。
