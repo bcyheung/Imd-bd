@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono"
 
 import { audit } from "./audit"
 import { hashPassword, id, nowIso, signToken, today, verifyPassword } from "./crypto"
-import { conflict, fail, forbidden, like, noContent, notFound, originOf, pageQuery } from "./http"
+import { conflict, fail, fileLinksOf, forbidden, like, noContent, notFound, pageQuery, type FileLinks } from "./http"
 import { permit, portalOf, requirePortal, requireStaff, staffOf } from "./middleware"
 import { notify, notifyStaffWith, toNotification, type RecipientType } from "./notifications"
 import { PERMISSIONS } from "./permissions"
@@ -316,7 +316,7 @@ api.get("/applicants/:id/documents", requireStaff, permit("document.read"), asyn
     .bind(c.req.param("id"))
     .all<Record<string, string | null>>()
   const items = []
-  for (const row of rows.results) items.push(await toDocument(c.env.DB, row, originOf(c)))
+  for (const row of rows.results) items.push(await toDocument(c.env.DB, row, fileLinksOf(c)))
   return c.json(items)
 })
 
@@ -340,7 +340,7 @@ api.post("/applicants/:id/documents", requireStaff, permit("document.create"), a
   const me = staffOf(c)
   await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "document.create", "document", docId, `登记证件 ${body.number}`)
   const row = await c.env.DB.prepare("SELECT * FROM documents WHERE id = ?").bind(docId).first<Record<string, string | null>>()
-  return c.json(await toDocument(c.env.DB, row!, originOf(c)), 201)
+  return c.json(await toDocument(c.env.DB, row!, fileLinksOf(c)), 201)
 })
 
 api.put("/documents/:id", requireStaff, permit("document.update"), async (c) => {
@@ -359,7 +359,7 @@ api.put("/documents/:id", requireStaff, permit("document.update"), async (c) => 
   const me = staffOf(c)
   await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "document.update", "document", doc.id, `修改证件 ${body.number}`)
   const row = await c.env.DB.prepare("SELECT * FROM documents WHERE id = ?").bind(doc.id).first<Record<string, string | null>>()
-  return c.json(await toDocument(c.env.DB, row!, originOf(c)))
+  return c.json(await toDocument(c.env.DB, row!, fileLinksOf(c)))
 })
 
 api.delete("/documents/:id", requireStaff, permit("document.delete"), async (c) => {
@@ -385,7 +385,7 @@ api.put("/documents/:id/verification", requireStaff, permit("document.verify"), 
     .run()
   await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "document.verify", "document", doc.id, `核验证件 ${doc.number}：${body.verification}`)
   const row = await c.env.DB.prepare("SELECT * FROM documents WHERE id = ?").bind(doc.id).first<Record<string, string | null>>()
-  return c.json(await toDocument(c.env.DB, row!, originOf(c)))
+  return c.json(await toDocument(c.env.DB, row!, fileLinksOf(c)))
 })
 
 api.post("/documents/:id/attachments", requireStaff, permit("document.create", "document.update"), async (c) => {
@@ -393,7 +393,7 @@ api.post("/documents/:id/attachments", requireStaff, permit("document.create", "
   if (!doc) notFound("证件")
   const form = await c.req.formData()
   const files = form.getAll("files").filter((file): file is File => file instanceof File)
-  const added = await storeFiles(c.env.DB, c.env.FILES, "document", doc.id, files, originOf(c))
+  const added = await storeFiles(c.env.DB, c.env.FILES, "document", doc.id, files, fileLinksOf(c))
   await c.env.DB.prepare("UPDATE documents SET updated_at = ? WHERE id = ?").bind(nowIso(), doc.id).run()
   return c.json(added, 201)
 })
@@ -457,12 +457,12 @@ api.get("/applications", requireStaff, permit("applicant.read"), async (c) => {
     .bind(...binds, pageSize, offset)
     .all<Parameters<typeof readApplication>[1]>()
   const items = []
-  for (const row of rows.results) items.push(await readApplication(c.env.DB, row, originOf(c)))
+  for (const row of rows.results) items.push(await readApplication(c.env.DB, row, fileLinksOf(c)))
   return c.json({ items, total: total?.n ?? 0, page, pageSize })
 })
 
 api.get("/applications/:id", requireStaff, permit("applicant.read"), async (c) => {
-  const application = await getApplication(c.env.DB, c.req.param("id"), originOf(c))
+  const application = await getApplication(c.env.DB, c.req.param("id"), fileLinksOf(c))
   if (!application) notFound("申请")
   return c.json(application)
 })
@@ -483,7 +483,7 @@ async function editableApplication(db: D1Database, applicationId: string) {
 api.get("/applications/:id/documents", requireStaff, permit("applicant.read"), async (c) => {
   const application = await c.env.DB.prepare("SELECT id FROM applications WHERE id = ?").bind(c.req.param("id")).first()
   if (!application) notFound("申请")
-  return c.json(await listApplicationDocuments(c.env.DB, c.req.param("id"), originOf(c)))
+  return c.json(await listApplicationDocuments(c.env.DB, c.req.param("id"), fileLinksOf(c)))
 })
 
 api.post("/applications/:id/documents", requireStaff, permit("document.create"), async (c) => {
@@ -495,7 +495,7 @@ api.post("/applications/:id/documents", requireStaff, permit("document.create"),
   }
   const files = form.getAll("files").filter((file): file is File => file instanceof File)
   if (!files.length) fail(400, "VALIDATION_FAILED", "请选择要上传的文件。", { files: "请选择要上传的文件" })
-  const added = await storeFiles(c.env.DB, c.env.FILES, "application", application.id, files, originOf(c), {
+  const added = await storeFiles(c.env.DB, c.env.FILES, "application", application.id, files, fileLinksOf(c), {
     category: category as DocumentCategory,
     source: "staff",
   })
@@ -503,13 +503,13 @@ api.post("/applications/:id/documents", requireStaff, permit("document.create"),
   const me = staffOf(c)
   await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "application.document.upload", "application", application.id, `代传材料 ${added.length} 份 ${application.application_no}`)
   const ids = new Set(added.map((file) => file.id))
-  const documents = await listApplicationDocuments(c.env.DB, application.id, originOf(c))
+  const documents = await listApplicationDocuments(c.env.DB, application.id, fileLinksOf(c))
   return c.json(documents.filter((doc) => ids.has(doc.id)), 201)
 })
 
 api.delete("/applications/:id/documents/:documentId", requireStaff, permit("document.create"), async (c) => {
   const application = await editableApplication(c.env.DB, c.req.param("id"))
-  const doc = await getApplicationDocument(c.env.DB, application.id, c.req.param("documentId"), originOf(c))
+  const doc = await getApplicationDocument(c.env.DB, application.id, c.req.param("documentId"), fileLinksOf(c))
   if (!doc) notFound("材料")
   if (doc.source !== "staff") conflict("申请人上传的材料不能由工作人员删除。")
   if (doc.verification !== "pending") conflict("材料已核验，不能删除。")
@@ -523,7 +523,7 @@ api.delete("/applications/:id/documents/:documentId", requireStaff, permit("docu
 api.put("/applications/:id/documents/:documentId/verification", requireStaff, permit("document.verify"), async (c) => {
   const body = await c.req.json<{ verification?: string; note?: string }>()
   const application = await editableApplication(c.env.DB, c.req.param("id"))
-  const doc = await getApplicationDocument(c.env.DB, application.id, c.req.param("documentId"), originOf(c))
+  const doc = await getApplicationDocument(c.env.DB, application.id, c.req.param("documentId"), fileLinksOf(c))
   if (!doc) notFound("材料")
   if (body.verification !== "verified" && body.verification !== "rejected") {
     fail(400, "VALIDATION_FAILED", "核验结论只能是通过或驳回。", { verification: "请选择核验结论" })
@@ -546,7 +546,7 @@ api.put("/applications/:id/documents/:documentId/verification", requireStaff, pe
       link: `/portal/applications/${application.id}`,
     })
   }
-  return c.json(await getApplicationDocument(c.env.DB, application.id, doc.id, originOf(c)))
+  return c.json(await getApplicationDocument(c.env.DB, application.id, doc.id, fileLinksOf(c)))
 })
 
 type DecisionAction =
@@ -588,7 +588,7 @@ const PUBLIC_NOTE_ACTIONS: DecisionAction[] = ["request_supplement", "reject", "
 
 api.post("/applications/:id/decision", requireStaff, async (c) => {
   const body = await c.req.json<{ action: DecisionAction; note?: string }>()
-  const application = await getApplication(c.env.DB, c.req.param("id"), originOf(c))
+  const application = await getApplication(c.env.DB, c.req.param("id"), fileLinksOf(c))
   if (!application) notFound("申请")
   const me = staffOf(c)
   const note = (body.note ?? "").trim()
@@ -716,7 +716,7 @@ api.post("/applications/:id/decision", requireStaff, async (c) => {
     }
   }
   await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "application.decision", "application", application.id, `${body.action} ${application.applicationNo}`)
-  return c.json(await getApplication(c.env.DB, application.id, originOf(c)))
+  return c.json(await getApplication(c.env.DB, application.id, fileLinksOf(c)))
 })
 
 const PENDING_STATUSES = ["submitted", "under_review", "supplement_required"]
@@ -1035,7 +1035,7 @@ api.get("/portal/applications", requirePortal, async (c) => {
     .bind(account.id, status, status)
     .all<Parameters<typeof readApplication>[1]>()
   const items = []
-  for (const row of rows.results) items.push(await readApplication(c.env.DB, row, originOf(c)))
+  for (const row of rows.results) items.push(await readApplication(c.env.DB, row, fileLinksOf(c)))
   return c.json(items)
 })
 
@@ -1063,7 +1063,7 @@ api.post("/portal/applications", requirePortal, async (c) => {
     .prepare("INSERT INTO application_timeline (application_id, status, note, actor, at) VALUES (?, 'draft', '申请已创建为草稿。', NULL, ?)")
     .bind(applicationId, at)
     .run()
-  return c.json(await getApplication(c.env.DB, applicationId, originOf(c)), 201)
+  return c.json(await getApplication(c.env.DB, applicationId, fileLinksOf(c)), 201)
 })
 
 api.get("/portal/applications/:id", requirePortal, async (c) => {
@@ -1080,7 +1080,7 @@ api.put("/portal/applications/:id", requirePortal, async (c) => {
     .prepare(`UPDATE applications SET ${sets.length ? `${sets.join(", ")}, ` : ""}updated_at = ? WHERE id = ?`)
     .bind(...values, at, application.id)
     .run()
-  return c.json(await getApplication(c.env.DB, application.id, originOf(c)))
+  return c.json(await getApplication(c.env.DB, application.id, fileLinksOf(c)))
 })
 
 api.post("/portal/applications/:id/submit", requirePortal, async (c) => {
@@ -1134,7 +1134,7 @@ api.post("/portal/applications/:id/submit", requirePortal, async (c) => {
     link: `/applications/${application.id}`,
   })
   await audit(c.env.DB, { type: "portal", id: account.id, name: account.fullName }, "application.submit", "application", application.id, `提交 ${applicationNo}`)
-  return c.json(await getApplication(c.env.DB, application.id, originOf(c)))
+  return c.json(await getApplication(c.env.DB, application.id, fileLinksOf(c)))
 })
 
 api.post("/portal/applications/:id/withdraw", requirePortal, async (c) => {
@@ -1155,7 +1155,7 @@ api.post("/portal/applications/:id/withdraw", requirePortal, async (c) => {
       link: `/applications/${application.id}`,
     })
   }
-  return c.json(await getApplication(c.env.DB, application.id, originOf(c)))
+  return c.json(await getApplication(c.env.DB, application.id, fileLinksOf(c)))
 })
 
 api.delete("/portal/applications/:id", requirePortal, async (c) => {
@@ -1179,7 +1179,7 @@ api.post("/portal/applications/:id/attachments", requirePortal, async (c) => {
   if (typeof key === "string" && key && !requirement) {
     fail(400, "VALIDATION_FAILED", "材料项不属于该申请类型。", { requirement: "材料项不属于该申请类型" })
   }
-  const added = await storeFiles(c.env.DB, c.env.FILES, "application", application.id, files, originOf(c), {
+  const added = await storeFiles(c.env.DB, c.env.FILES, "application", application.id, files, fileLinksOf(c), {
     category: requirement?.category,
     requirement: requirement?.key,
   })
@@ -1199,7 +1199,7 @@ notificationRoutes("/portal", "portal", requirePortal)
 
 async function ownApplication(c: Parameters<typeof portalOf>[0]) {
   const account = portalOf(c)
-  const application = await getApplication(c.env.DB, c.req.param("id") ?? "", originOf(c))
+  const application = await getApplication(c.env.DB, c.req.param("id") ?? "", fileLinksOf(c))
   if (!application || application.accountId !== account.id) notFound("申请")
   return application
 }
@@ -1260,7 +1260,7 @@ async function toApplicant(db: D1Database, row: Record<string, string>) {
   }
 }
 
-async function toDocument(db: D1Database, row: Record<string, string | null>, origin: string) {
+async function toDocument(db: D1Database, row: Record<string, string | null>, links: FileLinks) {
   return {
     id: row.id,
     applicantId: row.applicant_id,
@@ -1274,7 +1274,7 @@ async function toDocument(db: D1Database, row: Record<string, string | null>, or
     verificationNote: row.verification_note,
     verifiedBy: row.verified_by,
     verifiedAt: row.verified_at,
-    attachments: await listAttachments(db, "document", String(row.id), origin),
+    attachments: await listAttachments(db, "document", String(row.id), links),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
