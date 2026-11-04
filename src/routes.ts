@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono"
 
 import { audit } from "./audit"
-import { hashPassword, id, nowIso, signToken, today, verifyPassword } from "./crypto"
+import { hashPassword, id, nowIso, signToken, today, verifyFileLink, verifyPassword } from "./crypto"
 import { conflict, fail, fileLinksOf, forbidden, like, noContent, notFound, pageQuery, type FileLinks } from "./http"
 import { permit, portalOf, requirePortal, requireStaff, staffOf } from "./middleware"
 import { notify, notifyStaffWith, toNotification, type RecipientType } from "./notifications"
@@ -978,9 +978,13 @@ api.get("/audit-logs", requireStaff, permit("user.read", "role.read"), async (c)
 })
 
 api.get("/files/:id", async (c) => {
+  const fileId = c.req.param("id")
+  if (!(await verifyFileLink(c.env.JWT_SECRET, fileId, c.req.query("exp"), c.req.query("sig")))) {
+    fail(403, "LINK_EXPIRED", "文件链接已失效，请刷新页面后重新打开。")
+  }
   const row = await c.env.DB
     .prepare("SELECT file_name, mime_type, r2_key FROM attachments WHERE id = ?")
-    .bind(c.req.param("id"))
+    .bind(fileId)
     .first<{ file_name: string; mime_type: string; r2_key: string | null }>()
   if (!row?.r2_key) notFound("文件")
   const object = await c.env.FILES.get(row.r2_key)
@@ -989,6 +993,8 @@ api.get("/files/:id", async (c) => {
     headers: {
       "Content-Type": row.mime_type,
       "Content-Disposition": `inline; filename="${encodeURIComponent(row.file_name)}"`,
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
     },
   })
 })
