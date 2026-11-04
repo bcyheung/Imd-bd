@@ -401,7 +401,7 @@ api.post("/documents/:id/attachments", requireStaff, permit("document.create", "
 api.delete("/documents/:id/attachments/:attachmentId", requireStaff, permit("document.update"), async (c) => {
   const doc = await c.env.DB.prepare("SELECT id FROM documents WHERE id = ?").bind(c.req.param("id")).first()
   if (!doc) notFound("证件")
-  await removeAttachment(c.env, c.req.param("attachmentId"))
+  await removeAttachment(c.env, "document", c.req.param("id"), c.req.param("attachmentId"))
   return noContent(c)
 })
 
@@ -513,7 +513,7 @@ api.delete("/applications/:id/documents/:documentId", requireStaff, permit("docu
   if (!doc) notFound("材料")
   if (doc.source !== "staff") conflict("申请人上传的材料不能由工作人员删除。")
   if (doc.verification !== "pending") conflict("材料已核验，不能删除。")
-  await removeAttachment(c.env, doc.id)
+  await removeAttachment(c.env, "application", application.id, doc.id)
   await c.env.DB.prepare("UPDATE applications SET updated_at = ? WHERE id = ?").bind(nowIso(), application.id).run()
   const me = staffOf(c)
   await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "application.document.delete", "application", application.id, `删除代传材料 ${doc.fileName}`)
@@ -1190,7 +1190,7 @@ api.post("/portal/applications/:id/attachments", requirePortal, async (c) => {
 api.delete("/portal/applications/:id/attachments/:attachmentId", requirePortal, async (c) => {
   const application = await ownApplication(c)
   if (application.status !== "draft") conflict("申请已提交，不能再修改。如需变更请先撤回申请或联系受理机关。")
-  await removeAttachment(c.env, c.req.param("attachmentId"))
+  await removeAttachment(c.env, "application", application.id, c.req.param("attachmentId"))
   await c.env.DB.prepare("UPDATE applications SET updated_at = ? WHERE id = ?").bind(nowIso(), application.id).run()
   return noContent(c)
 })
@@ -1301,8 +1301,13 @@ async function deleteStored(env: AppEnv["Bindings"], ownerType: string, ownerId:
   for (const row of rows.results) await env.FILES.delete(row.r2_key)
 }
 
-async function removeAttachment(env: AppEnv["Bindings"], attachmentId: string) {
-  const row = await env.DB.prepare("SELECT r2_key FROM attachments WHERE id = ?").bind(attachmentId).first<{ r2_key: string | null }>()
-  if (row?.r2_key) await env.FILES.delete(row.r2_key)
+/** 附件 ID 来自请求路径，必须同时核对归属，否则可以借自己的记录删掉别人的附件。 */
+async function removeAttachment(env: AppEnv["Bindings"], ownerType: string, ownerId: string, attachmentId: string) {
+  const row = await env.DB
+    .prepare("SELECT r2_key FROM attachments WHERE id = ? AND owner_type = ? AND owner_id = ?")
+    .bind(attachmentId, ownerType, ownerId)
+    .first<{ r2_key: string | null }>()
+  if (!row) notFound("附件")
+  if (row.r2_key) await env.FILES.delete(row.r2_key)
   await env.DB.prepare("DELETE FROM attachments WHERE id = ?").bind(attachmentId).run()
 }
