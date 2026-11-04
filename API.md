@@ -323,7 +323,7 @@ Content-Type: application/json
   "fileName": "passport.pdf",
   "mimeType": "application/pdf",
   "size": 120034,
-  "url": "http://127.0.0.1:8787/api/v1/files/f-abc",
+  "url": "http://127.0.0.1:8787/api/v1/files/f-abc?exp=1790000000&sig=…",
   "uploadedAt": "2026-10-14T01:00:00.000Z",
   "category": "passport_scan",
   "requirement": "passport_bio",
@@ -436,7 +436,7 @@ Content-Type: application/json
 
 ### 下載檔案
 
-`GET /files/:id`　無需令牌。連結放在附件的 `url` 裡，瀏覽器可以直接打開。演示資料裡沒有實體檔案的附件，`url` 是 `"#"`，這個接口會回 404。
+`GET /files/:id?exp=…&sig=…`　無需令牌，改由連結自帶的簽名鑑權。附件的 `url` 已帶好簽名，瀏覽器可以直接打開；簽名一小時後過期，缺少、過期或被改動都回 `403 LINK_EXPIRED`，重新取一次附件所在的記錄即可拿到新連結。演示資料裡沒有實體檔案的附件，`url` 是 `"#"`。
 
 附件物件：
 
@@ -446,7 +446,7 @@ Content-Type: application/json
   "fileName": "passport.pdf",
   "mimeType": "application/pdf",
   "size": 120034,
-  "url": "http://127.0.0.1:8787/api/v1/files/f-abc",
+  "url": "http://127.0.0.1:8787/api/v1/files/f-abc?exp=1790000000&sig=…",
   "uploadedAt": "2026-09-28T01:00:00.000Z"
 }
 ```
