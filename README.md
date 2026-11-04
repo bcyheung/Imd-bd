@@ -49,7 +49,7 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8787/api/v1
 
 - 工作人员：`/auth/*`、`/users`、`/roles`、`/permissions`、`/applicants`、`/documents`、`/dashboard/summary`
 - 门户：`/portal/auth/*`、`/portal/applications`（草稿、提交、撤回、删除、材料上传）
-- 文件：`GET /files/:id`
+- 文件：`GET /files/:id?exp&sig`，链接由接口签好，一小时后失效
 
 课程模块图里前端还没接上、但后端已经提供的接口：
 
