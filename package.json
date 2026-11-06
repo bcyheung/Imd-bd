@@ -9,7 +9,8 @@
     "db:migrate": "wrangler d1 migrations apply ims --local",
     "db:migrate:remote": "wrangler d1 migrations apply ims --remote",
     "typecheck": "tsc --noEmit",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "check:requirements": "node scripts/requirements-check.mjs"
   },
   "dependencies": {
     "hono": "^4.9.8"

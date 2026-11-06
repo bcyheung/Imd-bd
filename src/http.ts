@@ -45,8 +45,14 @@ export function noContent(c: Context) {
   return c.body(null, 204)
 }
 
-export function originOf(c: Context) {
-  return new URL(c.req.url).origin
+/** 生成附件签名链接所需的上下文。 */
+export interface FileLinks {
+  origin: string
+  secret: string
+}
+
+export function fileLinksOf(c: Context<AppEnv>): FileLinks {
+  return { origin: new URL(c.req.url).origin, secret: c.env.JWT_SECRET }
 }
 
 export function pageQuery(c: Context) {

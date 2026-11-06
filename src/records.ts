@@ -1,5 +1,5 @@
-import { id, nowIso } from "./crypto"
-import { fail } from "./http"
+import { id, nowIso, signFileLink } from "./crypto"
+import { fail, type FileLinks } from "./http"
 
 const MAX_BYTES = 10 * 1024 * 1024
 const MAX_COUNT = 10
@@ -15,26 +15,38 @@ const SIGNATURES: Record<string, { mime: string; bytes: number[] }> = {
 export const DOCUMENT_CATEGORIES = ["passport_scan", "photo", "supporting", "other"] as const
 export type DocumentCategory = (typeof DOCUMENT_CATEGORIES)[number]
 
-export function fileUrl(origin: string, attachment: { id: string; r2_key: string | null }) {
-  return attachment.r2_key ? `${origin}/api/v1/files/${attachment.id}` : "#"
+export async function fileUrl(links: FileLinks, attachment: { id: string; r2_key: string | null }) {
+  if (!attachment.r2_key) return "#"
+  return `${links.origin}/api/v1/files/${attachment.id}?${await signFileLink(links.secret, attachment.id)}`
 }
 
-export async function listAttachments(db: D1Database, ownerType: string, ownerId: string, origin: string) {
+export async function listAttachments(db: D1Database, ownerType: string, ownerId: string, links: FileLinks) {
   const rows = await db
     .prepare(
-      `SELECT id, file_name, mime_type, size, r2_key, uploaded_at
+      `SELECT id, file_name, mime_type, size, r2_key, uploaded_at, requirement
        FROM attachments WHERE owner_type = ? AND owner_id = ? ORDER BY uploaded_at`,
     )
     .bind(ownerType, ownerId)
-    .all<{ id: string; file_name: string; mime_type: string; size: number; r2_key: string | null; uploaded_at: string }>()
-  return rows.results.map((row) => ({
-    id: row.id,
-    fileName: row.file_name,
-    mimeType: row.mime_type,
-    size: row.size,
-    url: fileUrl(origin, row),
-    uploadedAt: row.uploaded_at,
-  }))
+    .all<{
+      id: string
+      file_name: string
+      mime_type: string
+      size: number
+      r2_key: string | null
+      uploaded_at: string
+      requirement: string | null
+    }>()
+  return Promise.all(
+    rows.results.map(async (row) => ({
+      id: row.id,
+      fileName: row.file_name,
+      mimeType: row.mime_type,
+      size: row.size,
+      url: await fileUrl(links, row),
+      uploadedAt: row.uploaded_at,
+      requirement: row.requirement,
+    })),
+  )
 }
 
 interface DocumentRow {
@@ -46,6 +58,7 @@ interface DocumentRow {
   r2_key: string | null
   uploaded_at: string
   category: string
+  requirement: string | null
   source: string
   verification: string
   verification_note: string
@@ -53,16 +66,17 @@ interface DocumentRow {
   verified_at: string | null
 }
 
-function toApplicationDocument(row: DocumentRow, origin: string) {
+async function toApplicationDocument(row: DocumentRow, links: FileLinks) {
   return {
     id: row.id,
     applicationId: row.owner_id,
     fileName: row.file_name,
     mimeType: row.mime_type,
     size: row.size,
-    url: fileUrl(origin, row),
+    url: await fileUrl(links, row),
     uploadedAt: row.uploaded_at,
     category: row.category,
+    requirement: row.requirement,
     source: row.source,
     verification: row.verification,
     verificationNote: row.verification_note,
@@ -72,20 +86,20 @@ function toApplicationDocument(row: DocumentRow, origin: string) {
 }
 
 /** 工作人员视角的申请材料：申请人上传和窗口代传的都在这里，带核验状态。 */
-export async function listApplicationDocuments(db: D1Database, applicationId: string, origin: string) {
+export async function listApplicationDocuments(db: D1Database, applicationId: string, links: FileLinks) {
   const rows = await db
     .prepare("SELECT * FROM attachments WHERE owner_type = 'application' AND owner_id = ? ORDER BY uploaded_at, id")
     .bind(applicationId)
     .all<DocumentRow>()
-  return rows.results.map((row) => toApplicationDocument(row, origin))
+  return Promise.all(rows.results.map((row) => toApplicationDocument(row, links)))
 }
 
-export async function getApplicationDocument(db: D1Database, applicationId: string, documentId: string, origin: string) {
+export async function getApplicationDocument(db: D1Database, applicationId: string, documentId: string, links: FileLinks) {
   const row = await db
     .prepare("SELECT * FROM attachments WHERE owner_type = 'application' AND owner_id = ? AND id = ?")
     .bind(applicationId, documentId)
     .first<DocumentRow>()
-  return row ? toApplicationDocument(row, origin) : null
+  return row ? toApplicationDocument(row, links) : null
 }
 
 /** 还没有核验通过的申请材料份数；初审通过和终审通过前必须为 0。 */
@@ -138,8 +152,8 @@ export async function storeFiles(
   ownerType: string,
   ownerId: string,
   files: File[],
-  origin: string,
-  meta: { category?: DocumentCategory; source?: "applicant" | "staff" } = {},
+  links: FileLinks,
+  meta: { category?: DocumentCategory; requirement?: string | null; source?: "applicant" | "staff" } = {},
 ) {
   const checked = await checkFiles(db, ownerType, ownerId, files)
   const added = []
@@ -150,12 +164,32 @@ export async function storeFiles(
     const uploadedAt = nowIso()
     await db
       .prepare(
-        `INSERT INTO attachments (id, owner_type, owner_id, file_name, mime_type, size, r2_key, uploaded_at, category, source)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO attachments (id, owner_type, owner_id, file_name, mime_type, size, r2_key, uploaded_at, category, requirement, source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .bind(attachmentId, ownerType, ownerId, file.name, mime, file.size, key, uploadedAt, meta.category ?? "other", meta.source ?? "applicant")
+      .bind(
+        attachmentId,
+        ownerType,
+        ownerId,
+        file.name,
+        mime,
+        file.size,
+        key,
+        uploadedAt,
+        meta.category ?? "other",
+        meta.requirement ?? null,
+        meta.source ?? "applicant",
+      )
       .run()
-    added.push({ id: attachmentId, fileName: file.name, mimeType: mime, size: file.size, url: `${origin}/api/v1/files/${attachmentId}`, uploadedAt })
+    added.push({
+      id: attachmentId,
+      fileName: file.name,
+      mimeType: mime,
+      size: file.size,
+      url: await fileUrl(links, { id: attachmentId, r2_key: key }),
+      uploadedAt,
+      requirement: meta.requirement ?? null,
+    })
   }
   return added
 }
@@ -194,7 +228,7 @@ interface AppRow {
   updated_at: string
 }
 
-export async function readApplication(db: D1Database, row: AppRow, origin: string) {
+export async function readApplication(db: D1Database, row: AppRow, links: FileLinks) {
   const timeline = await db
     .prepare("SELECT status, note, actor, at FROM application_timeline WHERE application_id = ? ORDER BY id")
     .bind(row.id)
@@ -229,7 +263,7 @@ export async function readApplication(db: D1Database, row: AppRow, origin: strin
     passportIssuingAuthority: row.passport_issuing_authority,
     passportIssueDate: row.passport_issue_date,
     passportExpiryDate: row.passport_expiry_date,
-    attachments: await listAttachments(db, "application", row.id, origin),
+    attachments: await listAttachments(db, "application", row.id, links),
     reviewNote: row.review_note,
     approvalLevel: row.status === "under_review" ? (row.approval_level ?? "first_review") : null,
     approvals: approvals.results.map((a) => ({
@@ -249,9 +283,9 @@ export async function readApplication(db: D1Database, row: AppRow, origin: strin
   }
 }
 
-export async function getApplication(db: D1Database, id: string, origin: string) {
+export async function getApplication(db: D1Database, id: string, links: FileLinks) {
   const row = await db.prepare("SELECT * FROM applications WHERE id = ?").bind(id).first<AppRow>()
-  return row ? readApplication(db, row, origin) : null
+  return row ? readApplication(db, row, links) : null
 }
 
 const DRAFT_COLUMNS: Record<string, string> = {

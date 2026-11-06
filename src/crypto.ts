@@ -74,6 +74,28 @@ export async function readToken(secret: string, token: string | undefined) {
   return payload
 }
 
+const FILE_LINK_SECONDS = 60 * 60
+
+/**
+ * 附件链接直接放进 <a href>，带不了 Authorization 头，所以改用短时签名：
+ * 只有调用过有权限的接口才能拿到链接，链接泄露后最多一小时内有效。
+ * 签名原文带 "file:" 前缀，与 JWT 的 "header.payload" 不会撞上。
+ */
+export async function signFileLink(secret: string, fileId: string) {
+  const exp = Math.floor(Date.now() / 1000) + FILE_LINK_SECONDS
+  const sig = await crypto.subtle.sign("HMAC", await hmacKey(secret), text.encode(`file:${fileId}:${exp}`))
+  return `exp=${exp}&sig=${b64url(new Uint8Array(sig))}`
+}
+
+export async function verifyFileLink(secret: string, fileId: string, exp: string | undefined, sig: string | undefined) {
+  if (!exp || !sig || !/^\d+$/.test(exp) || Number(exp) < Math.floor(Date.now() / 1000)) return false
+  try {
+    return await crypto.subtle.verify("HMAC", await hmacKey(secret), b64urlDecode(sig), text.encode(`file:${fileId}:${exp}`))
+  } catch {
+    return false
+  }
+}
+
 export function bearer(header: string | undefined) {
   if (!header?.startsWith("Bearer ")) return undefined
   return header.slice(7).trim()

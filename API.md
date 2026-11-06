@@ -323,9 +323,10 @@ Content-Type: application/json
   "fileName": "passport.pdf",
   "mimeType": "application/pdf",
   "size": 120034,
-  "url": "http://127.0.0.1:8787/api/v1/files/f-abc",
+  "url": "http://127.0.0.1:8787/api/v1/files/f-abc?exp=1790000000&sig=…",
   "uploadedAt": "2026-10-14T01:00:00.000Z",
   "category": "passport_scan",
+  "requirement": "passport_bio",
   "source": "staff",
   "verification": "pending",
   "verificationNote": "",
@@ -334,7 +335,7 @@ Content-Type: application/json
 }
 ```
 
-`category`：`passport_scan`、`photo`、`supporting`、`other`。門戶上傳的材料 `source` 是 `applicant`，`category` 是 `other`。
+`category`：`passport_scan`、`photo`、`supporting`、`other`。`requirement` 是申請類型清單裡的材料項（見「申請」一節），工作人員代傳和舊資料為 `null`。門戶上傳的材料 `source` 是 `applicant`，`category` 由 `requirement` 決定，沒有 `requirement` 時是 `other`。
 
 所有上傳入口（門戶申請材料、證件掃描件、代傳）都做同樣的校驗，整批通過才寫入，不通過回 `400` 並在 `message` 寫明檔名和原因：
 
@@ -435,7 +436,7 @@ Content-Type: application/json
 
 ### 下載檔案
 
-`GET /files/:id`　無需令牌。連結放在附件的 `url` 裡，瀏覽器可以直接打開。演示資料裡沒有實體檔案的附件，`url` 是 `"#"`，這個接口會回 404。
+`GET /files/:id?exp=…&sig=…`　無需令牌，改由連結自帶的簽名鑑權。附件的 `url` 已帶好簽名，瀏覽器可以直接打開；簽名一小時後過期，缺少、過期或被改動都回 `403 LINK_EXPIRED`，重新取一次附件所在的記錄即可拿到新連結。演示資料裡沒有實體檔案的附件，`url` 是 `"#"`。
 
 附件物件：
 
@@ -445,7 +446,7 @@ Content-Type: application/json
   "fileName": "passport.pdf",
   "mimeType": "application/pdf",
   "size": 120034,
-  "url": "http://127.0.0.1:8787/api/v1/files/f-abc",
+  "url": "http://127.0.0.1:8787/api/v1/files/f-abc?exp=1790000000&sig=…",
   "uploadedAt": "2026-09-28T01:00:00.000Z"
 }
 ```
@@ -511,7 +512,7 @@ Content-Type: application/json
 | `POST` | `/portal/applications/:id/submit` | 提交，生成 `applicationNo`，狀態變 `submitted` |
 | `POST` | `/portal/applications/:id/withdraw` | 受理前撤回 |
 | `DELETE` | `/portal/applications/:id` | 只刪草稿，`204` |
-| `POST` | `/portal/applications/:id/attachments` | 只在草稿上傳，`201` |
+| `POST` | `/portal/applications/:id/attachments` | 只在草稿上傳，`201`。欄位 `files`，可帶 `requirement`（材料項） |
 | `DELETE` | `/portal/applications/:id/attachments/:attachmentId` | 只在草稿移除，`204` |
 
 草稿可寫的欄位：`type`、`purpose`、`intendedArrivalDate`、`intendedStayDays`、`surname`、`givenNames`、`nativeName`、`sex`、`dateOfBirth`、`placeOfBirth`、`nationality`、`maritalStatus`、`occupation`、`address`、`phone`、`email`、`passportNumber`、`passportIssuingCountry`、`passportIssuingAuthority`、`passportIssueDate`、`passportExpiryDate`。請求裡的 `status`、`accountId` 等會被忽略。
@@ -521,6 +522,30 @@ Content-Type: application/json
 提交時以下欄位不能是空，而且至少要有一份材料。缺的欄位在 `fieldErrors` 裡：
 
 `type`、`purpose`、`intendedArrivalDate`、`surname`、`givenNames`、`sex`、`dateOfBirth`、`placeOfBirth`、`nationality`、`maritalStatus`、`passportNumber`、`passportIssuingCountry`、`passportIssueDate`、`passportExpiryDate`、`attachments`
+
+#### 按申請類型的規則
+
+規則在 `src/requirements.ts`，與前端 `src/features/portal/requirements.ts` 保持一致。必填欄位齊全後，提交時再按類型校驗，錯誤同樣放在 `fieldErrors`：
+
+| 類型 | `intendedArrivalDate` | `intendedStayDays` | 護照有效期 |
+| --- | --- | --- | --- |
+| `visa` | 計劃入境日期，不早於今天 | 1–180 | 未過期，且晚於入境日期 |
+| `residence_permit` | 入境日期，不晚於今天 | 91–1825 | 未過期 |
+| `residence_extension` | 延期起始日期，不早於今天 | 1–1825 | 未過期，且晚於延期起始日期 |
+| `permanent_residence` | 首次入境日期，不晚於今天 | 不校驗，前端送 `0` | 未過期 |
+| `travel_document` | 計劃出行日期，不早於今天 | 1–90 | 不校驗（原護照可能已過期） |
+
+上傳時 `requirement` 必須屬於該類型的清單，否則回 `400`，`fieldErrors.requirement`。各類型的材料項：
+
+| 類型 | 必交 | 選交 |
+| --- | --- | --- |
+| `visa` | `passport_bio`、`photo`、`itinerary`、`accommodation`、`financial_proof` | `invitation`、`insurance`、`other` |
+| `residence_permit` | `passport_bio`、`photo`、`entry_record`、`purpose_proof`、`address_proof`、`health_check` | `criminal_record`、`other` |
+| `residence_extension` | `passport_bio`、`photo`、`current_permit`、`continuation_proof`、`address_proof` | `tax_record`、`other` |
+| `permanent_residence` | `passport_bio`、`photo`、`residence_history`、`income_proof`、`criminal_record`、`health_check`、`address_proof` | `family_proof`、`other` |
+| `travel_document` | `loss_report`、`identity_proof`、`photo` | `passport_copy`、`itinerary`、`other` |
+
+只要有一份材料帶 `requirement`，提交時就核對必交材料，缺的寫在 `fieldErrors.attachments`，例如「缺少必交材料：证件照片、资金证明」。材料都沒有 `requirement`（舊版前端上傳）時只要求至少一份。
 
 提交成功後編號形如 `APP-2026-000101`，並通知有 `applicant.update` 權限的工作人員。
 
