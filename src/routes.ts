@@ -36,7 +36,7 @@ api.post("/auth/login", async (c) => {
   const at = nowIso()
   await c.env.DB.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").bind(at, user.id).run()
   const token = await signToken(c.env.JWT_SECRET, user.id, "staff")
-  await audit(c.env.DB, { type: "staff", id: user.id, name: user.fullName }, "auth.login", "user", user.id, "工作人员登录")
+  await audit(c.env.DB, { type: "staff", id: user.id, name: user.fullName }, "auth.login", "user", user.id, "Staff signed in")
   return c.json({ ...token, user: { ...publicStaff({ ...user, lastLoginAt: at }), permissions: user.permissions } })
 })
 
@@ -64,10 +64,10 @@ api.post("/auth/register", async (c) => {
     )
     .bind(userId, body.username, await hashPassword(body.password), body.fullName, body.employeeId, body.department, body.email, body.phone, createdAt)
     .run()
-  await audit(c.env.DB, { type: "system", id: null, name: body.fullName }, "auth.register", "user", userId, "提交账号申请")
+  await audit(c.env.DB, { type: "system", id: null, name: body.fullName }, "auth.register", "user", userId, "Submitted an account request")
   await notifyStaffWith(c.env.DB, "user.manage", {
-    title: "有新的账号申请待审核",
-    body: `${body.fullName}（${body.employeeId}，${body.department}）申请开通账号。`,
+    title: "New account request awaiting approval",
+    body: `${body.fullName} (${body.employeeId}, ${body.department}) has requested a staff account.`,
     category: "account",
     link: "/admin/users?status=pending",
   })
@@ -125,7 +125,7 @@ api.post("/users", requireStaff, permit("user.manage"), async (c) => {
     .run()
   await replaceRoles(c.env.DB, userId, (body.roleIds as string[]) ?? [])
   const me = staffOf(c)
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "user.create", "user", userId, `新建账号 ${username}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "user.create", "user", userId, `Created account ${username}`)
   return c.json(publicStaff((await loadStaff(c.env.DB, userId))!), 201)
 })
 
@@ -147,7 +147,7 @@ api.patch("/users/:id", requireStaff, permit("user.manage"), async (c) => {
     .run()
   if (Array.isArray(body.roleIds)) await replaceRoles(c.env.DB, user.id, body.roleIds as string[])
   const me = staffOf(c)
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "user.update", "user", user.id, `更新账号 ${user.username}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "user.update", "user", user.id, `Updated account ${user.username}`)
   return c.json(publicStaff((await loadStaff(c.env.DB, user.id))!))
 })
 
@@ -161,13 +161,13 @@ api.put("/users/:id/status", requireStaff, permit("user.manage"), async (c) => {
   if (body.roleIds) await replaceRoles(c.env.DB, user.id, body.roleIds)
   if (body.status === "active" && user.status === "pending") {
     await notify(c.env.DB, "staff", user.id, {
-      title: "账号已通过审核",
-      body: "你可以登录移民管理系统。",
+      title: "Your account has been approved",
+      body: "You can now sign in to the Immigration Management System.",
       category: "account",
       link: "/dashboard",
     })
   }
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "user.status", "user", user.id, `将 ${user.username} 设为 ${body.status}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "user.status", "user", user.id, `Set ${user.username} to ${body.status}`)
   return c.json(publicStaff((await loadStaff(c.env.DB, user.id))!))
 })
 
@@ -194,7 +194,7 @@ api.post("/roles", requireStaff, permit("role.manage"), async (c) => {
     .bind(roleId, body.code, body.name, body.description, JSON.stringify(body.permissions), updatedAt)
     .run()
   const me = staffOf(c)
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "role.create", "role", roleId, `新建角色 ${body.code}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "role.create", "role", roleId, `Created role ${body.code}`)
   return c.json({ id: roleId, ...body, builtIn: false, userCount: 0, updatedAt }, 201)
 })
 
@@ -212,7 +212,7 @@ api.put("/roles/:id", requireStaff, permit("role.manage"), async (c) => {
     .run()
   const count = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM user_roles WHERE role_id = ?").bind(role.id).first<{ n: number }>()
   const me = staffOf(c)
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "role.update", "role", role.id, `更新角色 ${body.code}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "role.update", "role", role.id, `Updated role ${body.code}`)
   return c.json({ id: role.id, ...body, builtIn: false, userCount: count?.n ?? 0, updatedAt })
 })
 
@@ -224,7 +224,7 @@ api.delete("/roles/:id", requireStaff, permit("role.manage"), async (c) => {
   if ((count?.n ?? 0) > 0) conflict("仍有用户持有该角色，请先调整这些用户的角色。")
   await c.env.DB.prepare("DELETE FROM roles WHERE id = ?").bind(role.id).run()
   const me = staffOf(c)
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "role.delete", "role", role.id, `删除角色 ${role.code}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "role.delete", "role", role.id, `Deleted role ${role.code}`)
   return noContent(c)
 })
 
@@ -267,7 +267,7 @@ api.post("/applicants", requireStaff, permit("applicant.create"), async (c) => {
     .bind(applicantId, fileNo, body.surname, body.givenNames, body.nativeName ?? "", body.sex, body.dateOfBirth, body.placeOfBirth, body.nationality, body.maritalStatus, body.occupation ?? "", body.phone ?? "", body.email ?? "", body.address ?? "", body.remarks ?? "", body.status ?? "active", at, at)
     .run()
   const me = staffOf(c)
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "applicant.create", "applicant", applicantId, `建立档案 ${fileNo}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "applicant.create", "applicant", applicantId, `Created record ${fileNo}`)
   const row = await c.env.DB.prepare("SELECT * FROM applicants WHERE id = ?").bind(applicantId).first<Record<string, string>>()
   return c.json(await toApplicant(c.env.DB, row!), 201)
 })
@@ -291,7 +291,7 @@ api.put("/applicants/:id", requireStaff, permit("applicant.update"), async (c) =
     .bind(body.surname, body.givenNames, body.nativeName ?? "", body.sex, body.dateOfBirth, body.placeOfBirth, body.nationality, body.maritalStatus, body.occupation ?? "", body.phone ?? "", body.email ?? "", body.address ?? "", body.remarks ?? "", body.status, at, current.id)
     .run()
   const me = staffOf(c)
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "applicant.update", "applicant", current.id, `更新档案 ${current.file_no}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "applicant.update", "applicant", current.id, `Updated record ${current.file_no}`)
   const row = await c.env.DB.prepare("SELECT * FROM applicants WHERE id = ?").bind(current.id).first<Record<string, string>>()
   return c.json(await toApplicant(c.env.DB, row!))
 })
@@ -304,7 +304,7 @@ api.delete("/applicants/:id", requireStaff, permit("applicant.delete"), async (c
   await c.env.DB.prepare("DELETE FROM documents WHERE applicant_id = ?").bind(current.id).run()
   await c.env.DB.prepare("DELETE FROM applicants WHERE id = ?").bind(current.id).run()
   const me = staffOf(c)
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "applicant.delete", "applicant", current.id, `删除档案 ${current.file_no}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "applicant.delete", "applicant", current.id, `Deleted record ${current.file_no}`)
   return noContent(c)
 })
 
@@ -338,7 +338,7 @@ api.post("/applicants/:id/documents", requireStaff, permit("document.create"), a
     .run()
   await c.env.DB.prepare("UPDATE applicants SET updated_at = ? WHERE id = ?").bind(at, applicant.id).run()
   const me = staffOf(c)
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "document.create", "document", docId, `登记证件 ${body.number}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "document.create", "document", docId, `Registered document ${body.number}`)
   const row = await c.env.DB.prepare("SELECT * FROM documents WHERE id = ?").bind(docId).first<Record<string, string | null>>()
   return c.json(await toDocument(c.env.DB, row!, fileLinksOf(c)), 201)
 })
@@ -357,7 +357,7 @@ api.put("/documents/:id", requireStaff, permit("document.update"), async (c) => 
     .bind(body.type, body.number, body.issuingCountry, body.issuingAuthority, body.issueDate, body.expiryDate || null, at, doc.id)
     .run()
   const me = staffOf(c)
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "document.update", "document", doc.id, `修改证件 ${body.number}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "document.update", "document", doc.id, `Updated document ${body.number}`)
   const row = await c.env.DB.prepare("SELECT * FROM documents WHERE id = ?").bind(doc.id).first<Record<string, string | null>>()
   return c.json(await toDocument(c.env.DB, row!, fileLinksOf(c)))
 })
@@ -369,7 +369,7 @@ api.delete("/documents/:id", requireStaff, permit("document.delete"), async (c) 
   await c.env.DB.prepare("DELETE FROM attachments WHERE owner_type = 'document' AND owner_id = ?").bind(doc.id).run()
   await c.env.DB.prepare("DELETE FROM documents WHERE id = ?").bind(doc.id).run()
   const me = staffOf(c)
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "document.delete", "document", doc.id, `删除证件 ${doc.number}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "document.delete", "document", doc.id, `Deleted document ${doc.number}`)
   return noContent(c)
 })
 
@@ -383,7 +383,7 @@ api.put("/documents/:id/verification", requireStaff, permit("document.verify"), 
     .prepare("UPDATE documents SET verification=?, verification_note=?, verified_by=?, verified_at=?, updated_at=? WHERE id=?")
     .bind(body.verification, body.note ?? "", me.fullName, at, at, doc.id)
     .run()
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "document.verify", "document", doc.id, `核验证件 ${doc.number}：${body.verification}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "document.verify", "document", doc.id, `Verified document ${doc.number}: ${body.verification}`)
   const row = await c.env.DB.prepare("SELECT * FROM documents WHERE id = ?").bind(doc.id).first<Record<string, string | null>>()
   return c.json(await toDocument(c.env.DB, row!, fileLinksOf(c)))
 })
@@ -501,7 +501,7 @@ api.post("/applications/:id/documents", requireStaff, permit("document.create"),
   })
   await c.env.DB.prepare("UPDATE applications SET updated_at = ? WHERE id = ?").bind(nowIso(), application.id).run()
   const me = staffOf(c)
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "application.document.upload", "application", application.id, `代传材料 ${added.length} 份 ${application.application_no}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "application.document.upload", "application", application.id, `Uploaded ${added.length} document(s) for ${application.application_no}`)
   const ids = new Set(added.map((file) => file.id))
   const documents = await listApplicationDocuments(c.env.DB, application.id, fileLinksOf(c))
   return c.json(documents.filter((doc) => ids.has(doc.id)), 201)
@@ -516,7 +516,7 @@ api.delete("/applications/:id/documents/:documentId", requireStaff, permit("docu
   await removeAttachment(c.env, "application", application.id, doc.id)
   await c.env.DB.prepare("UPDATE applications SET updated_at = ? WHERE id = ?").bind(nowIso(), application.id).run()
   const me = staffOf(c)
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "application.document.delete", "application", application.id, `删除代传材料 ${doc.fileName}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "application.document.delete", "application", application.id, `Deleted staff-uploaded document ${doc.fileName}`)
   return noContent(c)
 })
 
@@ -537,11 +537,11 @@ api.put("/applications/:id/documents/:documentId/verification", requireStaff, pe
     .bind(body.verification, note, me.fullName, at, doc.id)
     .run()
   await c.env.DB.prepare("UPDATE applications SET updated_at = ? WHERE id = ?").bind(at, application.id).run()
-  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "application.document.verify", "application", application.id, `核验材料 ${doc.fileName}：${body.verification}`)
+  await audit(c.env.DB, { type: "staff", id: me.id, name: me.fullName }, "application.document.verify", "application", application.id, `Verified document ${doc.fileName}: ${body.verification}`)
   if (body.verification === "rejected") {
     await notify(c.env.DB, "portal", application.account_id, {
-      title: "申请材料未通过核验",
-      body: `${application.application_no ?? "你的申请"}：${doc.fileName} 未通过核验。原因：${note}`,
+      title: "A document did not pass verification",
+      body: `${application.application_no ?? "Your application"}: ${doc.fileName} did not pass verification. Reason: ${note}`,
       category: "document",
       link: `/portal/applications/${application.id}`,
     })
@@ -617,7 +617,7 @@ api.post("/applications/:id/decision", requireStaff, async (c) => {
     case "start_review":
       next = "under_review"
       nextLevel = "first_review"
-      timelineNote = "已受理，进入审核。"
+      timelineNote = "Application accepted and under review."
       break
     case "pass_first_review":
       nextLevel = "final_review"
@@ -638,7 +638,7 @@ api.post("/applications/:id/decision", requireStaff, async (c) => {
     case "approve":
       next = "approved"
       nextLevel = null
-      timelineNote = note || "审核通过。"
+      timelineNote = note || "Application approved."
       break
   }
 
@@ -655,7 +655,7 @@ api.post("/applications/:id/decision", requireStaff, async (c) => {
           marital_status, occupation, phone, email, address, remarks, status, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
       )
-      .bind(applicantId, fileNo, application.surname, application.givenNames, application.nativeName, application.sex, application.dateOfBirth, application.placeOfBirth, application.nationality, application.maritalStatus, application.occupation, application.phone, application.email, application.address, `由申请 ${application.applicationNo} 建档`, at, at)
+      .bind(applicantId, fileNo, application.surname, application.givenNames, application.nativeName, application.sex, application.dateOfBirth, application.placeOfBirth, application.nationality, application.maritalStatus, application.occupation, application.phone, application.email, application.address, `Created from application ${application.applicationNo}`, at, at)
       .run()
     if (application.passportNumber) {
       await c.env.DB
@@ -668,7 +668,7 @@ api.post("/applications/:id/decision", requireStaff, async (c) => {
         .bind(id("d"), applicantId, application.passportNumber, application.passportIssuingCountry, application.passportIssuingAuthority, application.passportIssueDate, application.passportExpiryDate, me.fullName, at, at, at)
         .run()
     }
-    timelineNote = note || "审核通过，已建立申请人档案。"
+    timelineNote = note || "Application approved. An applicant record has been created."
   }
   const reviewNote = PUBLIC_NOTE_ACTIONS.includes(body.action) ? note || application.reviewNote : application.reviewNote
   await c.env.DB
@@ -688,8 +688,8 @@ api.post("/applications/:id/decision", requireStaff, async (c) => {
       .bind(application.id, next, timelineNote, me.fullName, at)
       .run()
     await notify(c.env.DB, "portal", application.accountId, {
-      title: "申请状态已更新",
-      body: `${application.applicationNo ?? "你的申请"}：${timelineNote}`,
+      title: "Application status updated",
+      body: `${application.applicationNo ?? "Your application"}: ${timelineNote}`,
       category: "application",
       link: `/portal/applications/${application.id}`,
     })
@@ -698,8 +698,8 @@ api.post("/applications/:id/decision", requireStaff, async (c) => {
   if (body.action === "pass_first_review") {
     // 初审人不能终审，不必通知自己
     await notifyStaffWith(c.env.DB, "application.approve", {
-      title: "有申请待终审",
-      body: `${application.applicationNo} 已由 ${me.fullName} 初审通过。`,
+      title: "Application awaiting final review",
+      body: `${application.applicationNo} passed first review by ${me.fullName}.`,
       category: "application",
       link: staffLink,
     }, me.id)
@@ -708,8 +708,8 @@ api.post("/applications/:id/decision", requireStaff, async (c) => {
     const firstReview = [...application.approvals].reverse().find((record) => record.action === "pass_first_review")
     if (firstReview && firstReview.actorId !== me.id) {
       await notify(c.env.DB, "staff", firstReview.actorId, {
-        title: "申请被退回初审",
-        body: `${application.applicationNo}：${note}`,
+        title: "Application returned to first review",
+        body: `${application.applicationNo}: ${note}`,
         category: "application",
         link: staffLink,
       })
@@ -1066,7 +1066,7 @@ api.post("/portal/applications", requirePortal, async (c) => {
     await c.env.DB.prepare(`UPDATE applications SET ${sets.join(", ")} WHERE id = ?`).bind(...values, applicationId).run()
   }
   await c.env.DB
-    .prepare("INSERT INTO application_timeline (application_id, status, note, actor, at) VALUES (?, 'draft', '申请已创建为草稿。', NULL, ?)")
+    .prepare("INSERT INTO application_timeline (application_id, status, note, actor, at) VALUES (?, 'draft', 'Application created as a draft.', NULL, ?)")
     .bind(applicationId, at)
     .run()
   return c.json(await getApplication(c.env.DB, applicationId, fileLinksOf(c)), 201)
@@ -1129,17 +1129,17 @@ api.post("/portal/applications/:id/submit", requirePortal, async (c) => {
     .bind(applicationNo, at, at, application.id)
     .run()
   await c.env.DB
-    .prepare("INSERT INTO application_timeline (application_id, status, note, actor, at) VALUES (?, 'submitted', '申请人提交申请，等待受理。', NULL, ?)")
+    .prepare("INSERT INTO application_timeline (application_id, status, note, actor, at) VALUES (?, 'submitted', 'Application submitted by the applicant and awaiting review.', NULL, ?)")
     .bind(application.id, at)
     .run()
   const account = portalOf(c)
   await notifyStaffWith(c.env.DB, "application.review", {
-    title: "有新的申请待受理",
-    body: `${applicationNo} 已提交。`,
+    title: "New application awaiting review",
+    body: `${applicationNo} has been submitted.`,
     category: "application",
     link: `/applications/${application.id}`,
   })
-  await audit(c.env.DB, { type: "portal", id: account.id, name: account.fullName }, "application.submit", "application", application.id, `提交 ${applicationNo}`)
+  await audit(c.env.DB, { type: "portal", id: account.id, name: account.fullName }, "application.submit", "application", application.id, `Submitted ${applicationNo}`)
   return c.json(await getApplication(c.env.DB, application.id, fileLinksOf(c)))
 })
 
@@ -1150,13 +1150,13 @@ api.post("/portal/applications/:id/withdraw", requirePortal, async (c) => {
   const at = nowIso()
   await c.env.DB.prepare("UPDATE applications SET status = 'withdrawn', updated_at = ? WHERE id = ?").bind(at, application.id).run()
   await c.env.DB
-    .prepare("INSERT INTO application_timeline (application_id, status, note, actor, at) VALUES (?, 'withdrawn', '申请人主动撤回申请。', NULL, ?)")
+    .prepare("INSERT INTO application_timeline (application_id, status, note, actor, at) VALUES (?, 'withdrawn', 'Application withdrawn by the applicant.', NULL, ?)")
     .bind(application.id, at)
     .run()
   if (application.status === "under_review") {
     await notifyStaffWith(c.env.DB, "application.review", {
-      title: "申请已被撤回",
-      body: `${application.applicationNo} 在审核中被申请人撤回。`,
+      title: "Application withdrawn",
+      body: `${application.applicationNo} was withdrawn by the applicant during review.`,
       category: "application",
       link: `/applications/${application.id}`,
     })
