@@ -25,7 +25,7 @@ const json = { ...auth, "Content-Type": "application/json" }
 const nextYear = new Date().getUTCFullYear() + 1
 const draft = {
   type: "visa",
-  purpose: "应邀赴境内参加行业展会并洽谈合作。",
+  purpose: "Invited to attend an industry trade fair and discuss business partnerships.",
   intendedArrivalDate: `${nextYear}-01-10`,
   intendedStayDays: 14,
   surname: "DOE",

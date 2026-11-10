@@ -18,12 +18,12 @@ async function seedIfEmpty(db: D1Database) {
   const adminHash = await hashPassword("Admin@2026")
   const at = nowIso()
   const roles: [string, string, string, string, string[], number][] = [
-    ["r-admin", "SYS_ADMIN", "系统管理员", "拥有全部权限，负责账号、角色与系统配置。", ALL_PERMISSIONS, 1],
+    ["r-admin", "SYS_ADMIN", "System Administrator", "Full access to all features; manages accounts, roles and system settings.", ALL_PERMISSIONS, 1],
     [
       "r-visa",
       "VISA_OFFICER",
-      "签证审核官",
-      "受理签证申请，维护申请人档案并核验证件。",
+      "Visa Officer",
+      "Processes visa applications, maintains applicant records and verifies documents.",
       [
         "applicant.read",
         "applicant.create",
@@ -40,8 +40,8 @@ async function seedIfEmpty(db: D1Database) {
     [
       "r-archive",
       "ARCHIVIST",
-      "档案管理员",
-      "负责档案建立、归档与证件扫描件管理。",
+      "Records Officer",
+      "Creates and archives applicant records and manages document scans.",
       [
         "applicant.read",
         "applicant.create",
@@ -57,16 +57,16 @@ async function seedIfEmpty(db: D1Database) {
     [
       "r-border",
       "BORDER_OFFICER",
-      "边检官员",
-      "口岸查验时调阅档案并核验证件。",
+      "Border Control Officer",
+      "Looks up applicant records and verifies documents at border checkpoints.",
       ["applicant.read", "document.read", "document.verify"],
       0,
     ],
     [
       "r-audit",
       "AUDITOR",
-      "督察审计员",
-      "只读访问业务数据与账号配置，用于合规审计。",
+      "Compliance Auditor",
+      "Read-only access to case data and account settings for compliance audits.",
       ["applicant.read", "document.read", "user.read", "role.read"],
       0,
     ],
@@ -85,7 +85,7 @@ async function seedIfEmpty(db: D1Database) {
       .prepare(
         `INSERT INTO users (
           id, username, password_hash, full_name, employee_id, department, email, phone, status, last_login_at, created_at
-        ) VALUES ('u-001', 'admin', ?, '林书远', 'E10231', '信息技术处', 'admin@nia.gov.example', '+000 102 0231 01', 'active', NULL, ?)`,
+        ) VALUES ('u-001', 'admin', ?, 'Lam Shu Yuen', 'E10231', 'Information Technology Division', 'admin@nia.gov.example', '+000 102 0231 01', 'active', NULL, ?)`,
       )
       .bind(adminHash, at),
     db.prepare("INSERT INTO user_roles (user_id, role_id) VALUES ('u-001', 'r-admin')"),
